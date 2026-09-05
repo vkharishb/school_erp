@@ -1,0 +1,1 @@
+"""Safe bulk-import foundations."""

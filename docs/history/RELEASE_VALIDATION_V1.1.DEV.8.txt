@@ -1,0 +1,47 @@
+School ERP V1.1.DEV.8 — Development Snapshot Validation
+Date: 2026-09-01
+
+IMPLEMENTED
+- Organization Admin authentication accepts either username or registered email under the ORGANIZATION_ADMIN account type.
+- Username/email matching is case-insensitive; password verification remains case-sensitive.
+- Migration 022 normalizes Organization Admin emails and enforces a case-insensitive partial unique index.
+- Organization API/tile exposes both login identifiers only to Super Admin and the owning Organization Admin level; lower roles receive no identifier values.
+- Local Vite development uses same-origin /api/v1 proxying.
+- Refresh handling redirects to login only after confirmed 401/403 rejection; network and backend 5xx failures preserve browser state.
+- Users module displays the backend error and provides Retry instead of forcing logout.
+
+VALIDATION PASSED IN THIS WORKSPACE
+- Python AST parse: 121 backend/application/migration/test files passed.
+- Python compileall: backend app, Alembic migrations and tests passed.
+- Alembic static graph: 22 migrations, one head (022), no missing parent revision.
+- Frontend package.json and package-lock.json parsed as valid JSON and both report 1.1.0-dev.8.
+- Node type-stripping syntax checks passed for changed non-JSX TypeScript: vite.config.ts, services/api.ts and authStore.ts.
+- Static contract scan confirmed dual username/email lookup, 401/403-only session clearing and relative /api/v1 development configuration.
+- Package hygiene scan found no real .env, private key, database/dump, node_modules, dist, .vite or __pycache__ content.
+- Version metadata is synchronized as V1.1.DEV.8.
+
+REGRESSION TESTS ADDED
+- backend/tests/test_organization_admin_login.py
+  - username login (case-insensitive)
+  - email login (case-insensitive)
+  - Organization API/tile username and email fields
+  - duplicate Organization Admin email rejection
+
+ENVIRONMENT-LIMITED / REQUIRED ON WINDOWS DEV
+- Backend pytest could not execute here because this runtime does not contain pytest/asyncpg or PostgreSQL/Redis services.
+- Frontend npm ci/build/lint could not execute because dependency installation is unavailable in this packaging runtime.
+- Apply and verify the live PostgreSQL migration 021 -> 022 before browser testing.
+
+WINDOWS DEV RELEASE GATE
+1. backend: alembic upgrade head
+2. backend: python -m app.scripts.bootstrap
+3. backend: pytest -q
+4. frontend: npm ci
+5. frontend: npm run build
+6. frontend: npm run lint
+7. Browser: login as Organization Admin once with username and once with email.
+8. Browser: open Users, stop the backend, retry/open Users and confirm the app shows a retryable error without logout; restart the backend and confirm Retry succeeds.
+9. Browser: expire/reject a session and confirm a genuine refresh 401/403 still redirects to login.
+
+PROMOTION STATUS
+DEVELOPMENT ONLY. Do not promote to V1.1.QA.1 until every Windows DEV release gate passes.

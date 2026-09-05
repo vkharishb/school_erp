@@ -1,0 +1,22 @@
+import { FormEvent, useEffect, useState } from "react";
+import { useParams } from "react-router-dom";
+import { foundationApi, teacherApi } from "../services/api";
+import { useAuthStore } from "../store/authStore";
+import { FormField as Field, FormSelect as Select, StatusAlert as Alert } from "../components/ui/FormControls";
+import { hasPermission } from "../utils/permissions";
+import { apiErrorMessage } from "../utils/apiError";
+import type { Campus, Teacher } from "../types";
+
+export default function TeachersPage() {
+  const { schoolId = "" } = useParams(); const user = useAuthStore((s) => s.user);
+  const canCreate = hasPermission(user, "teacher.create");
+  const [teachers, setTeachers] = useState<Teacher[]>([]),[campuses, setCampuses] = useState<Campus[]>([]),[search,setSearch]=useState(""),[error,setError]=useState(""),[message,setMessage]=useState("");
+  const [form,setForm]=useState({campus_id:"",employee_code:"",first_name:"",last_name:"",email:"",phone:"",designation:"",qualification:"",joining_date:""});
+  const load=async()=>{try{const[t,c]=await Promise.all([teacherApi.list(schoolId,search||undefined),foundationApi.campuses(schoolId)]);setTeachers(t);setCampuses(c);setForm(f=>({...f,campus_id:f.campus_id||user?.campus_id||c[0]?.id||""}));}catch(e){setError(apiErrorMessage(e,"Failed to load teachers"));}};
+  useEffect(()=>{if(schoolId)void load()},[schoolId,user?.campus_id]);
+  const create=async(e:FormEvent)=>{e.preventDefault();setError("");setMessage("");try{await teacherApi.create(schoolId,{...form,email:form.email||undefined,phone:form.phone||undefined,designation:form.designation||undefined,qualification:form.qualification||undefined,joining_date:form.joining_date||undefined});setMessage("Teacher created successfully");setForm(f=>({...f,employee_code:"",first_name:"",last_name:"",email:"",phone:"",designation:"",qualification:"",joining_date:""}));await load();}catch(e){setError(apiErrorMessage(e,"Failed to create teacher"));}};
+  return <div className="space-y-6"><div><h1 className="text-2xl font-bold">Teachers Management</h1><p className="text-gray-500 mt-1">Teacher profiles and employee details. Bulk imports are managed from School Administration → Bulk Imports.</p></div>{error&&<Alert kind="error" text={error}/>} {message&&<Alert kind="success" text={message}/>} 
+  {canCreate&&<section className="card"><h2 className="text-lg font-semibold mb-4">Add Teacher</h2><form onSubmit={create} className="grid grid-cols-1 md:grid-cols-3 gap-4"><Select label="Campus" value={form.campus_id} options={campuses.map(c=>[c.id,c.name])} onChange={v=>setForm({...form,campus_id:v})}/><Field label="Employee Code" value={form.employee_code} onChange={v=>setForm({...form,employee_code:v})}/><Field label="First Name" value={form.first_name} onChange={v=>setForm({...form,first_name:v})}/><Field label="Last Name" value={form.last_name} onChange={v=>setForm({...form,last_name:v})} required={false}/><Field label="Email" value={form.email} onChange={v=>setForm({...form,email:v})} type="email" required={false}/><Field label="Phone" value={form.phone} onChange={v=>setForm({...form,phone:v})} required={false}/><Field label="Designation" value={form.designation} onChange={v=>setForm({...form,designation:v})} required={false}/><Field label="Qualification" value={form.qualification} onChange={v=>setForm({...form,qualification:v})} required={false}/><Field label="Joining Date" value={form.joining_date} onChange={v=>setForm({...form,joining_date:v})} type="date" required={false}/><div className="md:col-span-3"><button className="btn-primary">Create Teacher</button></div></form></section>}
+  <section className="card flex gap-2"><input className="input" placeholder="Search teacher, employee code or email" value={search} onChange={e=>setSearch(e.target.value)}/><button className="btn-secondary" onClick={()=>void load()}>Search</button></section>
+  <section className="card overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left border-b"><th className="py-2">Teacher</th><th>Employee</th><th>Email</th><th>Designation</th><th>Status</th></tr></thead><tbody>{teachers.map(t=><tr key={t.id} className="border-b last:border-0"><td className="py-3 font-medium">{t.first_name} {t.last_name||""}</td><td>{t.employee_code}</td><td>{t.email||"—"}</td><td>{t.designation||"—"}</td><td>{t.is_active?"Active":"Inactive"}</td></tr>)}</tbody></table>{teachers.length===0&&<div className="py-8 text-center text-gray-500">No teachers found.</div>}</section></div>;
+}

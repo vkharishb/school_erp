@@ -1,0 +1,28 @@
+School ERP V1.1.10-dev.4 — Development Snapshot Validation
+Date: 2026-09-01
+Environment: packaging workspace (not the user's Windows/PostgreSQL development runtime)
+
+PASS 117 backend Python source/test/migration files parsed with 0 syntax errors.
+PASS Python compileall completed successfully.
+PASS Alembic migration chain has 20 revisions and a single head: 020.
+PASS frontend package.json version: 1.1.10-dev.4.
+PASS frontend package-lock.json root version: 1.1.10-dev.4.
+PASS backend OpenAPI/application version metadata: 1.1.10-dev.4.
+PASS /api/v1/system/version metadata: V1.1.10-dev.4 / migration head 020.
+PASS current package excludes runtime .env files, private keys, database dumps, node_modules, virtual environments and cache directories.
+
+NOT VERIFIED HERE PostgreSQL/Redis integration pytest: packaging Python environment does not contain asyncpg.
+NOT VERIFIED HERE frontend production build: available node_modules cache is incomplete and TypeScript reports missing installed type-definition packages. Run npm ci before npm run build in the Windows development environment.
+
+Release classification: DEVELOPMENT SNAPSHOT ONLY.
+QA status: NOT PROMOTED TO QA.
+Production status: NOT RELEASED.
+
+Required Windows validation before QA promotion:
+1. backend: pip install -r requirements.txt
+2. backend: alembic upgrade head
+3. backend: alembic current -> 020 (head)
+4. backend: pytest tests/ -v
+5. frontend: npm ci
+6. frontend: npm run build
+7. run security/dependency audits and Phase 1 manual regression.

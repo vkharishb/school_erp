@@ -1,0 +1,158 @@
+name: CD – Deploy Dev to EC2 (HTTPS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref already validated by CI and CT"
+        required: true
+        default: "dev"
+
+concurrency:
+  group: cd-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Validate deployment secrets
+        env:
+          DATABASE_URL: ${{ secrets.NEON_DEV_DATABASE_URL }}
+          APP_SECRET_KEY: ${{ secrets.APP_SECRET_KEY }}
+          SUPER_ADMIN_PASSWORD: ${{ secrets.SUPER_ADMIN_PASSWORD }}
+          SUPER_ADMIN_USERNAME: ${{ secrets.SUPER_ADMIN_USERNAME }}
+          SUPER_ADMIN_EMAIL: ${{ secrets.SUPER_ADMIN_EMAIL }}
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          SSH_HOST: ${{ secrets.EC2_HOST }}
+          SSH_USER: ${{ secrets.EC2_USER }}
+          APP_ORIGIN: ${{ secrets.EC2_APP_ORIGIN }}
+          TLS_CERT: ${{ secrets.EC2_TLS_CERT }}
+          TLS_KEY: ${{ secrets.EC2_TLS_KEY }}
+        run: |
+          set -euo pipefail
+          for name in DATABASE_URL APP_SECRET_KEY SUPER_ADMIN_USERNAME SUPER_ADMIN_EMAIL SUPER_ADMIN_PASSWORD SSH_KEY SSH_HOST SSH_USER APP_ORIGIN TLS_CERT TLS_KEY; do
+            if [ -z "${!name}" ]; then echo "Missing required secret: $name"; exit 1; fi
+          done
+          [ "${#APP_SECRET_KEY}" -ge 32 ] || { echo "APP_SECRET_KEY must be at least 32 characters"; exit 1; }
+          [[ "$APP_ORIGIN" == https://* ]] || { echo "EC2_APP_ORIGIN must start with https://"; exit 1; }
+          [[ "$DATABASE_URL" == postgresql://* || "$DATABASE_URL" == postgresql+asyncpg://* ]] || { echo "Database URL must be PostgreSQL"; exit 1; }
+          [[ "$DATABASE_URL" == *ssl=require* || "$DATABASE_URL" == *sslmode=require* ]] || { echo "Database URL must require TLS"; exit 1; }
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          SSH_HOST: ${{ secrets.EC2_HOST }}
+          SSH_USER: ${{ secrets.EC2_USER }}
+          SSH_PORT: ${{ secrets.EC2_SSH_PORT || '22' }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          cat >> ~/.ssh/config <<EOF
+          Host ec2
+            HostName $SSH_HOST
+            User $SSH_USER
+            Port $SSH_PORT
+            IdentityFile ~/.ssh/ec2_key
+            StrictHostKeyChecking accept-new
+          EOF
+
+      - name: Sync application
+        env:
+          APP_DIR: ${{ secrets.EC2_APP_DIR || '/opt/school-erp' }}
+        run: |
+          ssh ec2 "sudo mkdir -p '$APP_DIR' && sudo chown -R \$(whoami):\$(whoami) '$APP_DIR'"
+          rsync -az --delete -e ssh --exclude '.git' --exclude '.env' --exclude 'certs' --exclude node_modules --exclude __pycache__ --exclude '*.pyc' --exclude .venv --exclude backend/uploads ./ "ec2:$APP_DIR/"
+
+      - name: Write secure runtime files
+        env:
+          APP_DIR: ${{ secrets.EC2_APP_DIR || '/opt/school-erp' }}
+          DATABASE_URL: ${{ secrets.NEON_DEV_DATABASE_URL }}
+          APP_SECRET_KEY: ${{ secrets.APP_SECRET_KEY }}
+          SUPER_ADMIN_PASSWORD: ${{ secrets.SUPER_ADMIN_PASSWORD }}
+          SUPER_ADMIN_USERNAME: ${{ secrets.SUPER_ADMIN_USERNAME }}
+          SUPER_ADMIN_EMAIL: ${{ secrets.SUPER_ADMIN_EMAIL }}
+          APP_ORIGIN: ${{ secrets.EC2_APP_ORIGIN }}
+          TLS_CERT: ${{ secrets.EC2_TLS_CERT }}
+          TLS_KEY: ${{ secrets.EC2_TLS_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          tmp=$(mktemp -d)
+          cat > "$tmp/.env" <<EOF
+          APP_NAME=SchoolERP
+          APP_ENV=development
+          DEBUG=false
+          SECRET_KEY=$APP_SECRET_KEY
+          ACCESS_TOKEN_EXPIRE_MINUTES=30
+          REFRESH_TOKEN_EXPIRE_DAYS=7
+          REFRESH_COOKIE_SECURE=true
+          REFRESH_COOKIE_NAME=schoolerp_refresh
+          AUTH_LOGIN_MAX_ATTEMPTS=5
+          AUTH_LOGIN_WINDOW_SECONDS=300
+          DATABASE_URL=$DATABASE_URL
+          REDIS_URL=redis://redis:6379/0
+          CORS_ORIGINS=$APP_ORIGIN
+          SUPER_ADMIN_EMAIL=$SUPER_ADMIN_EMAIL
+          SUPER_ADMIN_USERNAME=$SUPER_ADMIN_USERNAME
+          SUPER_ADMIN_PASSWORD=$SUPER_ADMIN_PASSWORD
+          SUPER_ADMIN_FULL_NAME=Platform Super Admin
+          BACKUP_DIR=/app/backups
+          BACKUP_SCHEDULE_HOURS=24
+          BACKUP_RETENTION_COUNT=30
+          BROWSER_RESTORE_ENABLED=false
+          VITE_API_BASE_URL=/api/v1
+          EOF
+          mkdir -p "$tmp/certs"
+          printf '%s\n' "$TLS_CERT" > "$tmp/certs/schoolerp.crt"
+          printf '%s\n' "$TLS_KEY" > "$tmp/certs/schoolerp.key"
+          chmod 600 "$tmp/.env" "$tmp/certs/schoolerp.key"
+          scp "$tmp/.env" "ec2:$APP_DIR/.env"
+          ssh ec2 "mkdir -p '$APP_DIR/certs' && chmod 700 '$APP_DIR/certs'"
+          scp "$tmp/certs/schoolerp.crt" "$tmp/certs/schoolerp.key" "ec2:$APP_DIR/certs/"
+          rm -rf "$tmp"
+
+      - name: Install Docker and deploy TLS stack
+        env:
+          APP_DIR: ${{ secrets.EC2_APP_DIR || '/opt/school-erp' }}
+        run: |
+          ssh ec2 bash <<'REMOTE'
+            set -euo pipefail
+            APP_DIR="${{ secrets.EC2_APP_DIR || '/opt/school-erp' }}"
+            cd "$APP_DIR"
+            if ! command -v docker >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y ca-certificates curl gnupg
+              sudo install -m 0755 -d /etc/apt/keyrings
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+              chmod a+r /etc/apt/keyrings/docker.gpg
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+              sudo apt-get update -y
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            fi
+            DOCKER=docker; docker info >/dev/null 2>&1 || DOCKER='sudo docker'
+            sudo systemctl stop nginx 2>/dev/null || true
+            $DOCKER compose -f docker-compose.yml -f docker-compose.lan-tls.yml config --quiet
+            $DOCKER compose -f docker-compose.yml -f docker-compose.lan-tls.yml up --build -d --remove-orphans --force-recreate
+            for i in $(seq 1 60); do
+              curl -ksf https://127.0.0.1/health >/dev/null && break
+              sleep 2
+            done
+            curl -ksf https://127.0.0.1/health >/dev/null || { $DOCKER compose logs --tail=100; exit 1; }
+            $DOCKER compose ps
+          REMOTE
+
+      - name: Deployment summary
+        env:
+          APP_ORIGIN: ${{ secrets.EC2_APP_ORIGIN }}
+        run: |
+          echo "App: $APP_ORIGIN/"
+          echo "API: $APP_ORIGIN/api/v1"
+          echo "HTTPS is required; port 80 only redirects to TLS."

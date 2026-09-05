@@ -1,0 +1,12 @@
+School ERP V1.1.10-dev.5 — Development Snapshot Validation
+
+PASS login branding root-cause fix: Tailwind primary.950 is now defined.
+PASS login branding panel uses explicit high-contrast dark gradient.
+PASS AKSHARA SCHOOL and configured provider branding remains configurable.
+PASS account-type login behavior unchanged.
+PASS frontend package version metadata updated to 1.1.10-dev.5.
+PASS backend application/system version metadata updated to 1.1.10-dev.5.
+PASS Alembic head remains 020; no schema migration is required for this UI-only fix.
+PASS TypeScript/TSX syntax parse validation.
+PASS Python source compilation.
+NOTE Full npm production build must be run in the Windows development environment before QA promotion.

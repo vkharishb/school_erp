@@ -1,0 +1,17 @@
+School ERP V1.1.10-dev.2 — Development Snapshot Validation
+
+PASS TypeScript/TSX source syntax: 36 files, 0 parse errors.
+PASS Python source syntax: 104 files, 0 parse errors.
+PASS frontend package.json version: 1.1.10-dev.2.
+PASS frontend package-lock.json root version: 1.1.10-dev.2.
+PASS backend FastAPI version: 1.1.10-dev.2.
+PASS /api/v1/system/version release: V1.1.10-dev.2.
+PASS /api/v1/system/version migration head: 019.
+PASS Alembic chain has a single head: 019.
+PASS AKSHARA SCHOOL branding defaults present.
+PASS configured provider technology-partner branding present.
+PASS No new database migration required for this snapshot.
+
+NOT RUN Full frontend dependency install/build in packaging environment because internet access is unavailable and the npm cache does not contain all locked packages (zustand 5.0.14 missing). Run `npm ci` followed by `npm run build` on the Windows development workstation before QA promotion.
+
+Status: DEVELOPMENT ONLY — not QA or production approved.

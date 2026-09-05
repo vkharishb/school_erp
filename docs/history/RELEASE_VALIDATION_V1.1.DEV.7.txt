@@ -1,0 +1,17 @@
+School ERP V1.1.DEV.7 — Development Snapshot Validation
+Date: 2026-09-01
+
+PASS Python static compile: backend/app + backend/alembic (119 Python files in backend tree).
+PASS Alembic static graph: single head 021; 021 revises 020.
+PASS Branding source scan: no Powered by / Technology Partner / Srivalli provider attribution rendered in current frontend source.
+PASS Package hygiene source scan: no real .env, database dump, private-key file, node_modules, dist, .vite or __pycache__ retained for packaging.
+PASS Version metadata/source updated to V1.1.DEV.7.
+
+PENDING Frontend dependency-backed production build. npm ci could not complete within the packaging runtime; npm run build therefore could not resolve installed type dependencies. Re-run on Windows DEV with npm ci && npm run build.
+PENDING Backend pytest/integration suite. Packaging runtime lacks asyncpg; run against the Windows PostgreSQL/Redis DEV environment.
+PENDING Live Alembic 020 -> 021 migration on the Windows DEV PostgreSQL database.
+PENDING Fresh-database alembic upgrade head + bootstrap + end-to-end smoke test.
+PENDING Backup -> restore drill and optional off-site backup validation.
+PENDING Full RBAC/tenant-isolation/security regression before QA promotion.
+
+Promotion status: DEVELOPMENT ONLY. Do not promote to V1.1.QA.1 until all PENDING gates pass.

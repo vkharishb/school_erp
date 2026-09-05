@@ -1,0 +1,43 @@
+School ERP V1.1.DEV.9 — Development Snapshot Validation
+Date: 2026-09-01
+
+LIVE WINDOWS QA FINDINGS ADDRESSED
+- V1.1.DEV.8 migration 021 -> 022 applied successfully on PostgreSQL.
+- The corrected email fixtures and school_config catalogue improved the live suite from 22/37 to 24/37 passing.
+- Organization Admin username/email login passed after valid test email data was used.
+- The remaining live UndefinedColumnError failures exposed Campus ORM/schema drift.
+- Migration 023 now creates campuses.archived_at and campuses.archived_by, the timestamp index and the SET NULL user foreign key.
+- The remaining duplicate-email KeyError was a stale test assertion; it now reads error.message from the standardized API error envelope.
+
+VALIDATION PASSED IN THIS WORKSPACE
+- Python AST parse: 122 backend/application/migration/test files passed.
+- Python compileall: backend app, Alembic migrations and tests passed.
+- Alembic static graph: 23 migrations, one head (023), no duplicate revision or missing parent.
+- Migration 023 contract scan confirmed archived_at, archived_by, index, foreign key and downgrade operations.
+- Phase 1 licensing, bootstrap catalogue and frontend school-provisioning defaults include school_config; IMPLEMENTED_MODULES derives from PHASE1_MODULES.
+- Validator-facing email fixtures no longer use the rejected .test email domain.
+- Duplicate Organization Admin email regression assertion follows error.message.
+- Frontend package.json and package-lock.json parsed as valid JSON and both report 1.1.0-dev.9.
+- Node type-stripping syntax checks passed for branding.ts, vite.config.ts, services/api.ts and store/authStore.ts.
+- Version metadata is synchronized as V1.1.DEV.9 with Alembic head 023.
+- Package hygiene scan found no runtime .env, private-key material, database dumps, caches, dependency directories, build output or nested archives.
+
+ENVIRONMENT-LIMITED / REQUIRED ON WINDOWS DEV
+- Backend pytest cannot execute in this packaging runtime because pytest/asyncpg and PostgreSQL/Redis services are unavailable.
+- The complete 37-test live PostgreSQL suite must be rerun after applying migration 023.
+- Frontend dependency-backed npm build/lint and browser checks remain required before QA promotion.
+
+WINDOWS DEV RELEASE GATE
+1. backend: alembic upgrade head
+2. backend: alembic current  (must report 023 (head))
+3. backend: python -m app.scripts.bootstrap
+4. backend: pytest tests/
+5. frontend: npm ci
+6. frontend: npm run build
+7. frontend: npm run lint
+8. Browser: login as Organization Admin with username and with email.
+9. Browser: confirm the Organization tile shows both login identifiers.
+10. Browser: open Users successfully; verify a retryable network/backend failure does not log out the session.
+
+PROMOTION STATUS
+DEVELOPMENT ONLY. Do not promote to V1.1.QA.1 until the Windows DEV release gate passes, with a target of 37 passed and 0 failed.

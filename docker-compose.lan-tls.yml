@@ -1,0 +1,14 @@
+services:
+  nginx:
+    ports:
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.lan-tls.conf:/etc/nginx/nginx.conf:ro
+      - ./certs/schoolerp.crt:/etc/nginx/certs/schoolerp.crt:ro
+      - ./certs/schoolerp.key:/etc/nginx/certs/schoolerp.key:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -q -O - https://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+

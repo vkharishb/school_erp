@@ -1,0 +1,32 @@
+School ERP V1.1.dev15 - Cleanup Validation
+Date: 2026-09-05
+
+PASS  Frontend TypeScript type-check
+PASS  Frontend noUnusedLocals/noUnusedParameters check
+PASS  Frontend tests: 12/12
+PASS  Frontend production/PWA build
+PASS  Backend database-independent tests: 15/15
+PASS  Python source compilation
+PASS  Ruff lint + format: 132 files
+PASS  NPM audit: 0 known vulnerabilities
+PASS  Python dependency audit: 0 known vulnerabilities
+PASS  Bandit: 0 medium/high findings; 8 reviewed low informational findings
+PASS  GitHub workflow YAML validation
+PASS  Runtime secrets/credentials moved to required environment configuration
+PASS  PyJWT HS256 token smoke test
+PASS  Platform Owner user-hierarchy fix: lint, type-check, build, static security
+ADDED Database regression: Platform Owner sees governing Organization Admin;
+      non-Platform actors cannot enable the expanded hierarchy view
+BLOCK Full backend database suite: PostgreSQL hostname `db` unavailable
+      Observed result: 21 passed, 31 setup connection errors
+
+Cleanup focus:
+- shared form/status UI primitives
+- centralized navigation and route access rules
+- fixed partial Class/Section bulk permission exposure
+- restricted school directory to platform/organization scope
+- no unproven dead route, CSS, or compatibility endpoint removed
+- client school name and bootstrap credentials are not runtime source defaults
+- vulnerable fast-uri, python-dotenv, pytest and ecdsa dependency paths remediated
+- Platform Owner school Users list includes its Organization Admin without exposing
+  that expanded view to lower roles
