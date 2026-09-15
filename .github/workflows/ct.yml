@@ -28,7 +28,7 @@ jobs:
         working-directory: backend
 
     env:
-      DATABASE_URL: ${{ secrets.NEON_DEV_DATABASE_URL }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL_DEV}}
       SECRET_KEY: test-secret-key-for-ci-only-not-for-production
       APP_ENV: test
       DEBUG: "false"
