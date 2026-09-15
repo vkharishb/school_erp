@@ -101,6 +101,15 @@ PLATFORM_MODULES: list[PlatformModule] = [
         "is_core": True,
     },
     {
+        "code": "planner",
+        "name": "Calendar Planner",
+        "phase": 1,
+        "status": "ready_dev",
+        "status_label": "Ready in DEV",
+        "note": "Platform Owner follow-up calendar for subscriptions, payments, activation and retention workflows.",
+        "is_core": False,
+    },
+    {
         "code": "exams",
         "name": "Exams",
         "phase": 2,

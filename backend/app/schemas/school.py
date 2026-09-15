@@ -2,7 +2,9 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
+
+from app.core.contact_validation import normalize_email, normalize_india_mobile
 
 
 class UDISECodeInput(BaseModel):
@@ -19,31 +21,54 @@ class UDISECodeOut(UDISECodeInput):
 
 class SchoolConfigurationBase(BaseModel):
     name: str = Field(..., min_length=2, max_length=255)
-    short_name: str | None = Field(None, max_length=50)
+    short_name: str | None = Field(None, max_length=20, pattern=r"^[A-Za-z0-9]+$")
     area: str | None = Field(None, max_length=100)
     area_code: str | None = Field(None, min_length=2, max_length=10, pattern=r"^[A-Za-z0-9]+$")
     tagline: str | None = Field(None, max_length=255)
     principal_head_name: str | None = Field(None, max_length=255)
-    principal_head_email: EmailStr | None = None
+    principal_head_email: str | None = None
     principal_head_phone: str | None = Field(None, max_length=30)
     logo_url: str | None = None
     address_line1: str | None = None
     address_line2: str | None = None
     city: str | None = None
+    district: str | None = None
     state: str | None = None
     country: str | None = "India"
     pincode: str | None = None
     phone: str | None = None
-    email: EmailStr | None = None
+    email: str | None = None
     website: str | None = None
     current_academic_year: str | None = None
     academic_year_start_month: int = 4
     board: str | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def validate_contacts(self) -> "SchoolConfigurationBase":
+        if self.principal_head_email is not None:
+            self.principal_head_email = normalize_email(self.principal_head_email)
+        if self.email is not None:
+            self.email = normalize_email(self.email)
+        if self.principal_head_phone is not None:
+            self.principal_head_phone = normalize_india_mobile(self.principal_head_phone)
+        if self.phone is not None:
+            self.phone = normalize_india_mobile(self.phone)
+        return self
+
 
 class SchoolConfigurationCreate(SchoolConfigurationBase):
+    short_name: str = Field(..., min_length=2, max_length=20, pattern=r"^[A-Za-z0-9]+$")
     area: str = Field(..., min_length=2, max_length=100)
+    area_code: str = Field(..., min_length=2, max_length=10, pattern=r"^[A-Za-z0-9]+$")
+    board: Literal["State Board", "CBSE", "ICSE"]
+    email: str
+    phone: str
+    address_line1: str = Field(..., min_length=2, max_length=255)
+    city: str = Field(..., min_length=2, max_length=100)
+    district: str = Field(..., min_length=2, max_length=100)
+    state: str = Field(..., min_length=2, max_length=100)
+    pincode: str = Field(..., pattern=r"^[1-9][0-9]{5}$")
 
 
 class SchoolConfigurationUpdate(BaseModel):
@@ -53,20 +78,33 @@ class SchoolConfigurationUpdate(BaseModel):
     area_code: str | None = Field(None, min_length=2, max_length=10, pattern=r"^[A-Za-z0-9]+$")
     tagline: str | None = None
     principal_head_name: str | None = None
-    principal_head_email: EmailStr | None = None
+    principal_head_email: str | None = None
     principal_head_phone: str | None = None
     logo_url: str | None = None
     address_line1: str | None = None
     address_line2: str | None = None
     city: str | None = None
+    district: str | None = None
     state: str | None = None
     country: str | None = None
     pincode: str | None = None
     phone: str | None = None
-    email: EmailStr | None = None
+    email: str | None = None
     website: str | None = None
     board: str | None = None
     settings: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_contacts(self) -> "SchoolConfigurationUpdate":
+        if self.principal_head_email is not None:
+            self.principal_head_email = normalize_email(self.principal_head_email)
+        if self.email is not None:
+            self.email = normalize_email(self.email)
+        if self.principal_head_phone is not None:
+            self.principal_head_phone = normalize_india_mobile(self.principal_head_phone)
+        if self.phone is not None:
+            self.phone = normalize_india_mobile(self.phone)
+        return self
 
 
 class SchoolConfigurationOut(SchoolConfigurationBase):
@@ -81,14 +119,22 @@ class SchoolAdminCreate(BaseModel):
     full_name: str = Field(min_length=2, max_length=255)
     designation: Literal["Principal", "Headmaster", "School Administrator"]
     username: str = Field(min_length=2, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
-    email: EmailStr | None = None
+    email: str | None = None
     phone: str | None = Field(None, max_length=30)
     password: str = Field(min_length=10, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_contacts(self) -> "SchoolAdminCreate":
+        if self.email is not None:
+            self.email = normalize_email(self.email)
+        if self.phone is not None:
+            self.phone = normalize_india_mobile(self.phone)
+        return self
 
 
 class SchoolCreate(BaseModel):
     organization_id: UUID
-    admin: SchoolAdminCreate | None = None
+    subscription_plan_id: UUID | None = None
     configuration: SchoolConfigurationCreate
     udise_codes: list[UDISECodeInput] = Field(default_factory=list, max_length=10)
     max_users: int = Field(50, ge=1, le=10000)
@@ -117,6 +163,11 @@ class SchoolProfileUpdate(BaseModel):
 
 class SchoolUpdate(BaseModel):
     is_active: bool | None = None
+    reason: str | None = Field(None, min_length=3, max_length=500)
+
+
+class SchoolLifecycleAction(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=500)
 
 
 class SchoolOut(BaseModel):
@@ -124,7 +175,7 @@ class SchoolOut(BaseModel):
     code: str
     udise_code: str | None = None
     udise_codes: list[UDISECodeOut] = Field(default_factory=list)
-    organization_id: UUID | None = None
+    organization_id: UUID
     is_active: bool
     deleted_at: datetime | None = None
     deleted_by: UUID | None = None

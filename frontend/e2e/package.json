@@ -1,0 +1,14 @@
+{
+  "name": "school-erp-playwright-e2e",
+  "private": true,
+  "version": "1.1.0-dev.22",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test -c playwright.config.ts",
+    "test:ui": "playwright test -c playwright.config.ts --ui",
+    "report": "playwright show-report playwright-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

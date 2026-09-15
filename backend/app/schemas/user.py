@@ -3,24 +3,33 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, model_validator
 
-ORGANIZATION_ADMIN_DESIGNATIONS = {"Secretary and Correspondent", "Chairman"}
+from app.core.contact_validation import normalize_email, normalize_india_mobile
+
+ORGANIZATION_ADMIN_DESIGNATIONS = {
+    "Chairman",
+    "Secretary & Correspondent",
+    "Treasurer",
+    "Director",
+    "Managing Director",
+    "Administrator",
+    "Authorized Representative",
+}
 SCHOOL_ADMIN_DESIGNATIONS = {"Principal", "Headmaster", "School Administrator"}
 
 
 def validate_admin_designation(account_type: str, designation: str | None) -> str | None:
     value = designation.strip() if designation else None
     if account_type == "ORGANIZATION_ADMIN":
-        value = value or "Secretary and Correspondent"
-        if value not in ORGANIZATION_ADMIN_DESIGNATIONS:
+        if not value or value not in ORGANIZATION_ADMIN_DESIGNATIONS:
             raise ValueError(
-                "Organization Admin designation must be Secretary and Correspondent or Chairman"
+                "Organization Admin designation must be Chairman, Secretary & Correspondent, "
+                "Treasurer, Director, Managing Director, Administrator, or Authorized Representative"
             )
-    elif account_type == "SCHOOL_ADMIN":
+        return value
+    if account_type == "SCHOOL_ADMIN":
         value = value or "Principal"
         if value not in SCHOOL_ADMIN_DESIGNATIONS:
-            raise ValueError(
-                "School / Branch Admin designation must be Principal, Headmaster, or School Administrator"
-            )
+            raise ValueError("School / Branch Admin designation must be Principal, Headmaster, or School Administrator")
     return value
 
 
@@ -37,7 +46,6 @@ PREDEFINED_ACCOUNT_TYPES = {
 
 class UserCreate(BaseModel):
     username: str = Field(min_length=2, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
-    password: str = Field(min_length=10, max_length=128)
     full_name: str = Field(min_length=2, max_length=255)
     designation: str | None = Field(None, max_length=100)
     account_type: str
@@ -53,8 +61,15 @@ class UserCreate(BaseModel):
         if self.account_type not in PREDEFINED_ACCOUNT_TYPES:
             raise ValueError("Unknown account type")
         self.designation = validate_admin_designation(self.account_type, self.designation)
-        if self.account_type == "PARENT_STUDENT" and not self.phone:
-            raise ValueError("Phone number is required for Parent / Student access")
+        if self.account_type in {"SCHOOL_ADMIN", "ACCOUNTS", "TEACHER", "RECEPTIONIST", "PARENT_STUDENT"}:
+            if not self.email:
+                raise ValueError("Email is required for school-level users")
+            if not self.phone:
+                raise ValueError("Phone is required for school-level users")
+        if self.email is not None:
+            self.email = normalize_email(str(self.email), required=True)
+        if self.phone is not None:
+            self.phone = normalize_india_mobile(self.phone, required=True)
         if self.campus_id and not self.school_id:
             raise ValueError("school_id is required when campus_id is supplied")
         if self.school_id and not self.organization_id:
@@ -70,6 +85,14 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None
     role_codes: list[str] | None = Field(None, min_length=1)
 
+    @model_validator(mode="after")
+    def validate_contacts(self) -> "UserUpdate":
+        if self.email is not None:
+            self.email = normalize_email(str(self.email), required=True)
+        if self.phone is not None:
+            self.phone = normalize_india_mobile(self.phone, required=True)
+        return self
+
 
 class PasswordResetRequest(BaseModel):
     new_password: str = Field(min_length=10, max_length=128)
@@ -82,6 +105,7 @@ class PasswordResetRequest(BaseModel):
 
 
 class ManagedUserOut(BaseModel):
+    temporary_password: str | None = None
     id: UUID
     username: str
     account_type: str
@@ -97,3 +121,5 @@ class ManagedUserOut(BaseModel):
     campus_id: UUID | None
     last_login_at: datetime | None
     roles: list[str]
+
+

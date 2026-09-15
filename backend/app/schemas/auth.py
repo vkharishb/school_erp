@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 ACCOUNT_TYPES = {
     "SUPER_ADMIN",
@@ -40,6 +40,13 @@ class TokenPayload(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1, max_length=128)
     new_password: str = Field(min_length=10, max_length=128)
+
+
+class ProfileUpdateRequest(BaseModel):
+    full_name: str = Field(min_length=2, max_length=255)
+    designation: str | None = Field(None, max_length=100)
+    email: EmailStr | None = None
+    phone: str | None = Field(None, max_length=30)
 
 
 class UserOut(BaseModel):

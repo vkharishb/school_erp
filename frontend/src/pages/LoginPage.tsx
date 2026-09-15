@@ -18,7 +18,7 @@ import type { AccountType } from "../types";
 
 const accountTypes: { value: AccountType; label: string }[] = [
   { value: "ORGANIZATION_ADMIN", label: "Organization Admin" },
-  { value: "SCHOOL_ADMIN", label: "School / Branch Admin" },
+  { value: "SCHOOL_ADMIN", label: "School Admin" },
   { value: "ACCOUNTS", label: "Accounts" },
   { value: "TEACHER", label: "Teacher" },
   { value: "RECEPTIONIST", label: "Receptionist" },
@@ -74,7 +74,7 @@ export default function LoginPage() {
 
         <div className="relative z-10 flex items-center gap-4">
           <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-white/20 bg-white text-primary-800 shadow-2xl shadow-slate-950/30">
-            <GraduationCap size={34} strokeWidth={2.1} aria-hidden="true" />
+            <img src={branding.logoUrl} alt="" className="h-10 w-10 object-contain" />
           </div>
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.28em] text-primary-200">
@@ -132,7 +132,7 @@ export default function LoginPage() {
         <div className="w-full max-w-md">
           <div className="mb-8 flex items-center gap-3 lg:hidden">
             <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary-800 text-white shadow-lg shadow-primary-900/20">
-              <GraduationCap size={27} aria-hidden="true" />
+              <img src={branding.logoUrl} alt="" className="h-8 w-8 object-contain" />
             </div>
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.2em] text-primary-700">

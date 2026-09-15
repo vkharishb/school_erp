@@ -1,5 +1,7 @@
+import re
 import asyncio
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
@@ -7,15 +9,20 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select, update
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
-from app.core.security import decode_token
+from app.services.society_trust_lifecycle import enforce_society_trust_retention
 from app.db.session import AsyncSessionLocal
 from app.models.user import User
-from app.services.audit import record_audit
+from app.models.license import SchoolLicense
+from app.models.school import School
+from app.models.subscription import OrganizationSubscription, SchoolSubscription
 from app.services.backups import create_backup, list_backups
+from app.services.session_control import revoke_school_sessions
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -40,23 +47,90 @@ async def _scheduled_backup_loop() -> None:
         await asyncio.sleep(min(settings.backup_schedule_hours * 3600, 3600))
 
 
+async def _trial_expiry_loop() -> None:
+    """Disable expired trial schools and their school-scoped users automatically."""
+    if settings.app_env.lower() in {"test", "ci"}:
+        return
+    from datetime import UTC, datetime
+
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                rows = list(
+                    (
+                        await db.execute(
+                            select(SchoolSubscription)
+                            .join(
+                                OrganizationSubscription,
+                                OrganizationSubscription.id
+                                == SchoolSubscription.organization_subscription_id,
+                            )
+                            .where(
+                                OrganizationSubscription.billing_cycle == "trial",
+                                SchoolSubscription.status == "trial",
+                                SchoolSubscription.expires_at <= datetime.now(UTC),
+                            )
+                        )
+                    ).scalars().all()
+                )
+                for entitlement in rows:
+                    entitlement.status = "expired"
+                    school = await db.get(School, entitlement.school_id)
+                    if school:
+                        school.is_active = False
+                    license_ = (
+                        await db.execute(
+                            select(SchoolLicense).where(
+                                SchoolLicense.school_id == entitlement.school_id
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if license_:
+                        license_.is_active = False
+                    await db.execute(
+                        update(User)
+                        .where(User.school_id == entitlement.school_id)
+                        .values(is_active=False)
+                    )
+                    await revoke_school_sessions(db, entitlement.school_id)
+                await db.commit()
+        except Exception:
+            logger.exception("Trial expiry enforcement failed")
+        await asyncio.sleep(3600)
+
+
+async def _society_trust_retention_loop():
+    while True:
+        try:
+            await enforce_society_trust_retention()
+        except Exception:
+            logger.exception("Society/Trust retention enforcement failed")
+        await asyncio.sleep(3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(_scheduled_backup_loop())
+    tasks = [
+        asyncio.create_task(_scheduled_backup_loop()),
+        asyncio.create_task(_trial_expiry_loop()),
+        asyncio.create_task(_society_trust_retention_loop()),
+    ]
     try:
         yield
     finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(
     title=settings.app_name,
     description="Multi-tenant School ERP Platform - configurable, modular, secure.",
-    version="V1.1.DEV.15",
+    version="V1.1.24.01",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -71,48 +145,9 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api/v1")
-
-
-MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-CHANGE_CONTROL_EXEMPT_PATHS = {
-    "/api/v1/auth/login",
-    "/api/v1/auth/login/json",
-    "/api/v1/auth/refresh",
-    "/api/v1/auth/logout",
-    "/api/v1/auth/change-password",
-    "/api/v1/system/development-reset",
-}
-
-
-async def _record_generic_confirmed_change(request: Request) -> None:
-    """Fallback audit so every successful confirmed mutation has an audit event."""
-    authorization = request.headers.get("authorization", "")
-    if not authorization.lower().startswith("bearer "):
-        return
-    payload = decode_token(authorization.split(" ", 1)[1].strip())
-    if not payload or not payload.get("sub"):
-        return
-    try:
-        from uuid import UUID
-
-        user_id = UUID(payload["sub"])
-    except (TypeError, ValueError):
-        return
-    async with AsyncSessionLocal() as db:
-        user = await db.get(User, user_id)
-        if not user:
-            return
-        await record_audit(
-            db,
-            action="change.confirmed",
-            user=user,
-            module="change_control",
-            entity_type="API",
-            entity_id=request.url.path,
-            after={"method": request.method, "path": request.url.path},
-            request=request,
-        )
-        await db.commit()
+upload_root = Path(settings.upload_dir)
+upload_root.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(upload_root)), name="uploads")
 
 
 @app.middleware("http")
@@ -121,52 +156,8 @@ async def request_context(request: Request, call_next):
     request.state.request_id = request_id[:64]
     request.state.audit_recorded = False
 
-    is_non_mutating_post = request.method.upper() == "POST" and request.url.path.endswith(
-        "/preview"
-    )
-    is_controlled_change = (
-        request.url.path.startswith("/api/v1/")
-        and request.method.upper() in MUTATING_METHODS
-        and request.url.path not in CHANGE_CONTROL_EXEMPT_PATHS
-        and not is_non_mutating_post
-    )
-    if is_controlled_change:
-        confirmed = (request.headers.get("X-Change-Confirmed") or "").strip().lower()
-        if confirmed not in {"true", "1", "yes"}:
-            return JSONResponse(
-                status_code=428,
-                content={
-                    "error": {
-                        "code": "change_confirmation_required",
-                        "message": "Please confirm the change before submitting it.",
-                        "details": None,
-                    },
-                    "request_id": request.state.request_id,
-                },
-                headers={"X-Request-ID": request.state.request_id},
-            )
-        reason = (request.headers.get("X-Change-Reason") or "").strip()
-        if len(reason) < 3:
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "error": {
-                        "code": "change_reason_required",
-                        "message": "A reason is mandatory for every confirmed change.",
-                        "details": None,
-                    },
-                    "request_id": request.state.request_id,
-                },
-                headers={"X-Request-ID": request.state.request_id},
-            )
-
     response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
-    if is_controlled_change and response.status_code < 400 and not request.state.audit_recorded:
-        try:
-            await _record_generic_confirmed_change(request)
-        except Exception:
-            logger.exception("Fallback change audit failed request_id=%s", request.state.request_id)
     return response
 
 
@@ -252,7 +243,7 @@ def _safe_validation_details(exc: RequestValidationError) -> list[dict]:
         details.append(
             {
                 "field": _friendly_field(item.get("loc")),
-                "message": item.get("msg", "Invalid value"),
+                "message": re.sub(r"^Value error,\\s*", "", item.get("msg", "Invalid value")),
                 "type": item.get("type", "validation_error"),
             }
         )

@@ -1,4 +1,6 @@
 from datetime import UTC, datetime
+import secrets
+import string
 from typing import Annotated
 from uuid import UUID
 
@@ -14,11 +16,11 @@ from app.db.session import get_db
 from app.models.license import SchoolLicense
 from app.models.organization import Campus
 from app.models.school import School
+from app.models.subscription import OrganizationSubscription, SchoolSubscription
 from app.models.session import UserSession
 from app.models.user import Role, User, UserRole
 from app.schemas.user import (
     ManagedUserOut,
-    PasswordResetRequest,
     UserCreate,
     UserUpdate,
     validate_admin_designation,
@@ -33,6 +35,15 @@ ORGANIZATION_ADMIN = "ORGANIZATION_ADMIN"
 SCHOOL_ADMIN = "SCHOOL_ADMIN"
 STANDARD_SCHOOL_TYPES = {"SCHOOL_ADMIN", "ACCOUNTS", "TEACHER", "RECEPTIONIST", "PARENT_STUDENT"}
 FUNCTIONAL_TYPES = {"ACCOUNTS", "TEACHER", "RECEPTIONIST", "PARENT_STUDENT"}
+
+
+def _temporary_password(length: int = 16) -> str:
+    alphabet = string.ascii_letters + string.digits + "!@#$%&*"
+    while True:
+        value = "".join(secrets.choice(alphabet) for _ in range(length))
+        if (any(c.islower() for c in value) and any(c.isupper() for c in value)
+                and any(c.isdigit() for c in value) and any(c in "!@#$%&*" for c in value)):
+            return value
 
 
 def _to_out(user: User) -> ManagedUserOut:
@@ -176,7 +187,8 @@ async def create_user(
         )
     school, _campus = await _validate_scope_links(db, payload)
     normalized_username = normalize_username(payload.username)
-    validate_password(payload.password, username=normalized_username)
+    temporary_password = _temporary_password()
+    validate_password(temporary_password, username=normalized_username)
 
     if payload.account_type == SUPER_ADMIN and not actor.is_superuser:
         raise HTTPException(
@@ -199,6 +211,23 @@ async def create_user(
             )
 
     if school:
+        entitlement = (
+            await db.execute(
+                select(SchoolSubscription)
+                .where(SchoolSubscription.school_id == school.id)
+                .order_by(SchoolSubscription.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if entitlement:
+            account = await db.get(
+                OrganizationSubscription, entitlement.organization_subscription_id
+            )
+            if account and account.billing_cycle != "trial" and entitlement.status != "active":
+                raise HTTPException(
+                    status_code=403,
+                    detail="School activation is pending. Users cannot be created until ERP activation is completed.",
+                )
         lic_result = await db.execute(
             select(SchoolLicense).where(SchoolLicense.school_id == school.id)
         )
@@ -229,7 +258,7 @@ async def create_user(
         username=normalized_username,
         account_type=payload.account_type,
         email=payload.email,
-        hashed_password=get_password_hash(payload.password),
+        hashed_password=get_password_hash(temporary_password),
         full_name=payload.full_name,
         designation=payload.designation,
         phone=payload.phone,
@@ -262,7 +291,7 @@ async def create_user(
         target_organization_id=created.organization_id,
         target_school_id=created.school_id,
     )
-    return _to_out(created)
+    return _to_out(created).model_copy(update={"temporary_password": temporary_password})
 
 
 @router.get("", response_model=list[ManagedUserOut])
@@ -399,10 +428,9 @@ async def update_user(
     return _to_out(target)
 
 
-@router.post("/{user_id}/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/{user_id}/reset-password")
 async def reset_user_password(
     user_id: UUID,
-    payload: PasswordResetRequest,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
     actor: Annotated[User, Depends(require_permissions("user.edit"))],
@@ -417,8 +445,9 @@ async def reset_user_password(
             status_code=409, detail="Use Account Security to change your own password"
         )
     _assert_manage_scope(actor, target)
-    validate_password(payload.new_password, username=target.username)
-    target.hashed_password = get_password_hash(payload.new_password)
+    temporary_password = _temporary_password()
+    validate_password(temporary_password, username=target.username)
+    target.hashed_password = get_password_hash(temporary_password)
     target.must_change_password = True
     revoked = await _revoke_user_sessions(db, target.id, "password_reset")
     await db.flush()
@@ -438,4 +467,4 @@ async def reset_user_password(
         target_organization_id=target.organization_id,
         target_school_id=target.school_id,
     )
-    return None
+    return {"temporary_password": temporary_password, "username": target.username}

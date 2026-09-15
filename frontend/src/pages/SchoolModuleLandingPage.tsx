@@ -19,7 +19,7 @@ export default function SchoolModuleLandingPage({title,description,segment}:{tit
 
   useEffect(()=>{
     if(sid)return;
-    void schoolApi.list().then(setSchools).catch(e=>setError(apiErrorMessage(e,"Failed to load schools / branches.")));
+    void schoolApi.list().then(setSchools).catch(e=>setError(apiErrorMessage(e,"Failed to load Schools.")));
   },[sid]);
 
   const cards=useMemo(()=>sid?moduleCards(segment,sid,user):[],[segment,sid,user]);
@@ -28,7 +28,7 @@ export default function SchoolModuleLandingPage({title,description,segment}:{tit
   return <div className="space-y-6">
     <div><h1 className="text-2xl font-bold text-gray-900">{title}</h1><p className="mt-1 text-gray-500">{description}</p></div>
     {error&&<div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
-    {sid?<div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">{cards.filter(card=>card.show).map(card=>{const Icon=card.icon;return <Link key={card.title} to={card.to} className="card group transition hover:border-primary-300 hover:bg-primary-50/30"><div className="flex items-start gap-4"><div className="rounded-xl bg-primary-50 p-3 text-primary-700"><Icon size={23}/></div><div className="min-w-0"><h2 className="font-semibold text-gray-900 group-hover:text-primary-800">{card.title}</h2><p className="mt-1 text-sm leading-6 text-gray-500">{card.description}</p></div></div></Link>})}</div>:<section className="card"><h2 className="mb-4 text-lg font-semibold">Select School / Branch</h2><div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">{schools.map(school=><button key={school.id} className="rounded-xl border border-gray-200 p-4 text-left transition hover:border-primary-400 hover:bg-primary-50" onClick={()=>navigate(destination(school.id))}><div className="font-semibold">{school.configuration?.name||school.code}</div><div className="mt-1 text-sm text-gray-500">{school.code} · {school.is_active?"Active":"Disabled"}</div></button>)}</div>{schools.length===0&&!error&&<div className="py-6 text-gray-500">No accessible schools found.</div>}</section>}
+    {sid?<div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">{cards.filter(card=>card.show).map(card=>{const Icon=card.icon;return <Link key={card.title} to={card.to} className="card group transition hover:border-primary-300 hover:bg-primary-50/30"><div className="flex items-start gap-4"><div className="rounded-xl bg-primary-50 p-3 text-primary-700"><Icon size={23}/></div><div className="min-w-0"><h2 className="font-semibold text-gray-900 group-hover:text-primary-800">{card.title}</h2><p className="mt-1 text-sm leading-6 text-gray-500">{card.description}</p></div></div></Link>})}</div>:<section className="card"><h2 className="mb-4 text-lg font-semibold">Select School</h2><div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">{schools.map(school=><button key={school.id} className="rounded-xl border border-gray-200 p-4 text-left transition hover:border-primary-400 hover:bg-primary-50" onClick={()=>navigate(destination(school.id))}><div className="font-semibold">{school.configuration?.name||school.code}</div><div className="mt-1 text-sm text-gray-500">{school.code} · {school.is_active?"Active":"Disabled"}</div></button>)}</div>{schools.length===0&&!error&&<div className="py-6 text-gray-500">No accessible schools found.</div>}</section>}
   </div>;
 }
 
@@ -64,5 +64,5 @@ function moduleCards(segment:string,sid:string,user:User|null):ModuleCard[] {
   if(segment==="reports")return [
     {title:"Report Center",description:"Choose Student, Teacher, Fee, Attendance, Marks and authorized administrative reports.",to:path("reports"),icon:BarChart3,show:true},
   ];
-  return [{title:"Open Module",description:"Open this module for the selected school / branch.",to:path(segment),icon:School,show:true}];
+  return [{title:"Open Module",description:"Open this module for the selected School.",to:path(segment),icon:School,show:true}];
 }

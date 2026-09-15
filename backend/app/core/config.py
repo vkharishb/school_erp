@@ -39,6 +39,20 @@ class Settings(BaseSettings):
 
     license_validation_interval_hours: int = 24
 
+    # Transactional system email (independent of the future Communication module)
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_starttls: bool = True
+    frontend_login_url: str = "http://localhost:5173/login"
+    upload_dir: str = "uploads"
+
+    # Versioned legal acceptance recorded when an Organization Admin activates a paid School.
+    activation_terms_version: str = "2026-09-12"
+    activation_terms_url: str = ""
+
     backup_dir: str = "/app/backups"
     backup_schedule_hours: int = 24
     backup_retention_count: int = 30

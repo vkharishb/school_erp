@@ -99,7 +99,7 @@ export default function SystemSettingsPage() {
         <div>
           <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Platform Version</div>
           <div className="mt-1 text-xl font-bold text-gray-900">{platform?.release || "Loading…"}</div>
-          {platform && <div className="mt-2 text-xs text-gray-500">Alembic {platform.migration_head} · Environment: {platform.environment}</div>}
+          {platform && <div className="mt-2 space-y-1 text-xs text-gray-500"><div>Alembic {platform.migration_current || "?"} / {platform.migration_head} · {platform.migration_status?.replace(/_/g," ") || "status unavailable"}</div><div>Database: {platform.database_status || "unknown"} · API: {platform.api_status || "unknown"} · Environment: {platform.environment}</div></div>}
         </div>
         <ShieldCheck className="text-green-600" size={30}/>
       </div>

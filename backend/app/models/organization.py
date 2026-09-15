@@ -46,6 +46,11 @@ class Organization(Base):
     archived_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disabled_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    disable_reason: Mapped[str | None] = mapped_column(Text)
+    deletion_information_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    operational_data_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enabled_modules: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     license_starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     license_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

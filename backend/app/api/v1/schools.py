@@ -1,9 +1,10 @@
 import secrets
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -18,17 +19,15 @@ from app.core.deps import (
 from app.core.erp_codes import (
     area_short_code,
     format_school_code,
-    normalize_area_code,
     school_prefix,
 )
-from app.core.security import get_password_hash
-from app.core.usernames import normalize_username
 from app.db.session import get_db
 from app.models.governance import SchoolCodeRegistry
 from app.models.license import SchoolLicense
 from app.models.organization import AcademicYear, Campus, Organization, OrganizationAcademicYear
 from app.models.school import School, SchoolConfiguration, SchoolUDISECode
-from app.models.user import Role, User, UserRole
+from app.models.subscription import OrganizationSubscription, SchoolSubscription, SubscriptionPlan
+from app.models.user import User
 from app.schemas.license import SchoolLicenseOut, SchoolLicenseUpdate
 from app.schemas.school import (
     SchoolConfigurationOut,
@@ -36,6 +35,7 @@ from app.schemas.school import (
     SchoolCreate,
     SchoolOut,
     SchoolProfileUpdate,
+    SchoolLifecycleAction,
     SchoolUpdate,
     UDISECodeInput,
 )
@@ -46,10 +46,9 @@ from app.services.licensing import (
     IMPLEMENTED_MODULES,
     PHASE1_MODULES,
     next_may_31,
-    require_core_modules,
 )
-from app.services.password_policy import validate_password
 from app.services.session_control import revoke_school_sessions
+from app.services.subscriptions import attach_school_entitlement, effective_modules, plan_for_school
 
 router = APIRouter(prefix="/schools", tags=["Schools"])
 
@@ -58,31 +57,32 @@ def _generate_license_key() -> str:
     return f"SERP-{secrets.token_hex(16).upper()}"
 
 
-async def _next_school_code(
-    db: AsyncSession,
-    *,
-    organization_id: UUID,
-    school_name: str,
-    area: str,
-    requested_area_code: str | None,
+async def _school_code_from_input(
+    db: AsyncSession, *, school_name: str, area_name: str
 ) -> tuple[str, str]:
-    prefix = school_prefix(school_name)
-    location = (
-        normalize_area_code(requested_area_code) if requested_area_code else area_short_code(area)
-    )
-    result = await db.execute(
-        select(SchoolCodeRegistry.code).where(
-            SchoolCodeRegistry.organization_id == organization_id,
-            SchoolCodeRegistry.code.like(f"{prefix}-{location}-%"),
+    """Generate the permanent human-readable ERP School code.
+
+    Codes use the approved <school-prefix>-<area-code>-<sequence> format.
+    SchoolCodeRegistry is append-only, so archived School codes are never reused.
+    The Organization row is already locked by the caller, serializing School
+    creation within an Organization while the registry unique constraint is the
+    final cross-request safety net.
+    """
+    school_part = school_prefix(school_name)
+    village_part = area_short_code(area_name)
+    prefix = f"{school_part}-{village_part}-"
+    issued = (
+        await db.execute(
+            select(SchoolCodeRegistry.code).where(SchoolCodeRegistry.code.like(f"{prefix}%"))
         )
-    )
-    numbers: list[int] = []
-    for code in result.scalars().all():
-        try:
-            numbers.append(int(str(code).rsplit("-", 1)[1]))
-        except (ValueError, IndexError):
-            continue
-    return format_school_code(prefix, location, max(numbers, default=0) + 1), location
+    ).scalars().all()
+    sequences = []
+    for issued_code in issued:
+        suffix = issued_code.removeprefix(prefix)
+        if suffix.isdigit():
+            sequences.append(int(suffix))
+    code = format_school_code(school_part, village_part, max(sequences, default=0) + 1)
+    return code, village_part
 
 
 async def _load_school(
@@ -103,6 +103,61 @@ def _require_reloaded_school(school: School | None) -> School:
     if school is None:
         raise HTTPException(status_code=500, detail="School could not be reloaded after update")
     return school
+
+
+async def _lock_and_check_school_capacity(
+    db: AsyncSession, organization_id: UUID, *, adding_slot: bool
+) -> tuple[Organization, OrganizationSubscription | None, int, int]:
+    """Serialize capacity-sensitive School lifecycle operations per Organization.
+
+    Non-archived School records consume capacity, including disabled and
+    pending-activation Schools. Restoring an archived School consumes one new
+    slot; enabling an existing non-archived School does not.
+    """
+    organization = (
+        await db.execute(
+            select(Organization)
+            .where(Organization.id == organization_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if not organization:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    subscription = (
+        await db.execute(
+            select(OrganizationSubscription)
+            .where(
+                OrganizationSubscription.organization_id == organization.id,
+                OrganizationSubscription.status.in_(["trial", "pending_payment", "active", "overdue"]),
+            )
+            .order_by(OrganizationSubscription.created_at.desc())
+            .limit(1)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    count = int(
+        (
+            await db.execute(
+                select(func.count(School.id)).where(
+                    School.organization_id == organization.id,
+                    School.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one()
+        or 0
+    )
+    limit = (
+        1
+        if subscription and subscription.billing_cycle == "trial"
+        else (subscription.school_count if subscription else organization.allowed_schools)
+    )
+    projected = count + (1 if adding_slot else 0)
+    if projected > limit:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Organization School limit reached ({limit}). Increase the subscription capacity before this action.",
+        )
+    return organization, subscription, count, limit
 
 
 async def _validate_udise_codes(
@@ -178,18 +233,13 @@ async def create_school(
     payload: SchoolCreate,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    actor: Annotated[User, Depends(require_permissions("school.admin.edit"))],
+    actor: Annotated[User, Depends(get_current_active_superuser)],
 ):
-    if not (actor.is_superuser or actor.account_type == "ORGANIZATION_ADMIN"):
-        raise HTTPException(
-            status_code=403,
-            detail="Only Organization Admin or Super Admin can create Schools / Branches",
-        )
-    organization = await db.get(Organization, payload.organization_id)
-    if not organization:
-        raise HTTPException(status_code=404, detail="Organization not found")
-    if not actor.is_superuser and actor.organization_id != organization.id:
-        raise HTTPException(status_code=403, detail="Organization access denied")
+    # Serialize School creation per Organization so concurrent requests cannot
+    # over-allocate the final purchased School slot.
+    organization, subscription, _active_count, _school_limit = await _lock_and_check_school_capacity(
+        db, payload.organization_id, adding_slot=True
+    )
     if organization.archived_at is not None:
         raise HTTPException(
             status_code=409, detail="Cannot create a School under an archived Organization"
@@ -198,64 +248,28 @@ async def create_school(
         raise HTTPException(
             status_code=409, detail="Cannot create a School under a disabled Organization"
         )
-    if organization.license_expires_at and organization.license_expires_at < datetime.now(UTC):
-        raise HTTPException(
-            status_code=409, detail="Cannot create a School under an expired Organization license"
-        )
-
-    active_count = int(
-        (
-            await db.execute(
-                select(func.count(School.id)).where(
-                    School.organization_id == organization.id,
-                    School.deleted_at.is_(None),
-                )
-            )
-        ).scalar_one()
-        or 0
-    )
-    if not actor.is_superuser and active_count >= organization.allowed_schools:
+    # V1.1.24.01: plan authority is School-level. The Organization plan is only a legacy/default fallback.
+    selected_plan_id = payload.subscription_plan_id or (subscription.plan_id if subscription else None)
+    plan = await db.get(SubscriptionPlan, selected_plan_id) if selected_plan_id else None
+    if payload.subscription_plan_id and (not plan or not plan.is_active):
+        raise HTTPException(status_code=404, detail="Active School subscription plan not found")
+    if subscription and subscription.expires_at <= datetime.now(UTC):
         raise HTTPException(
             status_code=409,
-            detail=f"Organization School limit reached ({organization.allowed_schools}). Contact Super Admin to increase the allowed number of Schools.",
+            detail="Organization subscription has expired. Renew or convert it before adding a School.",
         )
 
-    admin_username = None
-    school_admin_role = None
-    if payload.admin:
-        admin_username = normalize_username(payload.admin.username)
-        validate_password(payload.admin.password, username=admin_username)
-        duplicate_user = await db.execute(
-            select(User.id).where(func.lower(User.username) == admin_username)
-        )
-        if duplicate_user.scalar_one_or_none():
-            raise HTTPException(
-                status_code=409, detail="School / Branch Admin username already exists"
-            )
-        role_result = await db.execute(
-            select(Role).where(Role.code == "SCHOOL_ADMIN", Role.school_id.is_(None))
-        )
-        school_admin_role = role_result.scalars().first()
-        if not school_admin_role:
-            raise HTTPException(
-                status_code=500, detail="School / Branch Admin system role is not initialized"
-            )
 
-    code, generated_area_code = await _next_school_code(
+    code, generated_area_code = await _school_code_from_input(
         db,
-        organization_id=organization.id,
         school_name=payload.configuration.name,
-        area=payload.configuration.area,
-        requested_area_code=payload.configuration.area_code,
+        area_name=payload.configuration.area,
     )
     # ERP code may never be reused, including archived historical rows. Reserve it
     # in the permanent registry before the School is created. The unique registry
     # constraint also protects against concurrent creation races.
     duplicate_code = await db.execute(
-        select(SchoolCodeRegistry.id).where(
-            SchoolCodeRegistry.organization_id == organization.id,
-            SchoolCodeRegistry.code == code,
-        )
+        select(SchoolCodeRegistry.id).where(SchoolCodeRegistry.code == code)
     )
     if duplicate_code.scalar_one_or_none():
         raise HTTPException(
@@ -268,23 +282,23 @@ async def create_school(
 
     udise_values = await _validate_udise_codes(db, payload.udise_codes)
     primary_udise = next((item.udise_code for item in udise_values if item.is_primary), None)
-    school = School(code=code, udise_code=primary_udise, organization_id=organization.id)
+    trial_access = bool(subscription and subscription.billing_cycle == "trial")
+    # Trial is immediately operational under its restricted entitlement. Paid
+    # Schools remain disabled until the Organization Admin completes ERP
+    # activation. Plan assignment alone must never unlock modules or users.
+    paid_pending_activation = bool(not trial_access)
+    school = School(
+        code=code,
+        udise_code=primary_udise,
+        organization_id=organization.id,
+        is_active=not paid_pending_activation,
+    )
     db.add(school)
     await db.flush()
     registry.issued_school_id = school.id
 
     config_data = payload.configuration.model_dump()
     config_data["area_code"] = generated_area_code
-    if payload.admin:
-        config_data["principal_head_name"] = (
-            config_data.get("principal_head_name") or payload.admin.full_name.strip()
-        )
-        config_data["principal_head_email"] = (
-            config_data.get("principal_head_email") or payload.admin.email
-        )
-        config_data["principal_head_phone"] = (
-            config_data.get("principal_head_phone") or payload.admin.phone
-        )
     config = SchoolConfiguration(school_id=school.id, **config_data)
     db.add(config)
     for item in udise_values:
@@ -294,21 +308,23 @@ async def create_school(
                 udise_code=item.udise_code,
                 label=item.label,
                 is_primary=item.is_primary,
-                is_active=True,
+                is_active=False,
             )
         )
 
     now = datetime.now(UTC)
-    requested_modules = payload.enabled_modules or list(PHASE1_MODULES)
+    requested_modules = (
+        effective_modules(plan, trial=trial_access)
+        if subscription and plan
+        else (payload.enabled_modules or list(PHASE1_MODULES))
+    )
     unavailable = sorted(set(requested_modules) - IMPLEMENTED_MODULES)
     if unavailable:
         raise HTTPException(
             status_code=409, detail=f"Modules not implemented yet: {', '.join(unavailable)}"
         )
-    try:
-        require_core_modules(requested_modules)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Subscription-backed schools use the exact module entitlement attached
+    # to their selected Plan. There is no mandatory/Core ERP module bundle.
     if organization.enabled_modules:
         invalid = sorted(set(requested_modules) - set(organization.enabled_modules))
         if invalid:
@@ -316,18 +332,34 @@ async def create_school(
                 status_code=422,
                 detail=f"Modules not enabled for Organization: {', '.join(invalid)}",
             )
-    expiry = payload.license_expires_at or organization.license_expires_at or next_may_31(now)
-    db.add(
-        SchoolLicense(
-            school_id=school.id,
-            license_key=_generate_license_key(),
-            enabled_modules=requested_modules,
-            max_users=payload.max_users,
-            starts_at=now,
-            expires_at=expiry,
-            is_active=True,
-        )
+    expiry = (
+        subscription.expires_at
+        if subscription
+        else (payload.license_expires_at or organization.license_expires_at or next_may_31(now))
     )
+    if subscription and plan:
+        try:
+            await attach_school_entitlement(
+                db,
+                account=subscription,
+                plan=plan,
+                school_id=school.id,
+                created_by=actor.id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    else:
+        db.add(
+            SchoolLicense(
+                school_id=school.id,
+                license_key=_generate_license_key(),
+                enabled_modules=requested_modules,
+                max_users=payload.max_users,
+                starts_at=now,
+                expires_at=expiry,
+                is_active=True,
+            )
+        )
 
     # MAIN is an internal compatibility scope. The School/Branch itself is the visible unit.
     main_campus = Campus(
@@ -344,27 +376,6 @@ async def create_school(
     db.add(main_campus)
     await db.flush()
 
-    school_admin = None
-    if payload.admin and admin_username and school_admin_role:
-        school_admin = User(
-            username=admin_username,
-            account_type="SCHOOL_ADMIN",
-            email=str(payload.admin.email) if payload.admin.email else None,
-            hashed_password=get_password_hash(payload.admin.password),
-            full_name=payload.admin.full_name.strip(),
-            designation=payload.admin.designation,
-            phone=payload.admin.phone,
-            organization_id=organization.id,
-            school_id=school.id,
-            campus_id=None,
-            is_superuser=False,
-            is_active=True,
-            must_change_password=True,
-        )
-        db.add(school_admin)
-        await db.flush()
-        db.add(UserRole(user_id=school_admin.id, role_id=school_admin_role.id))
-        await db.flush()
 
     # If the Organization already has Academic Years, create the internal School
     # projections now. Academic Years remain user-managed only at Organization level.
@@ -403,9 +414,8 @@ async def create_school(
             "area": config.area,
             "area_code": config.area_code,
             "udise_codes": [u.udise_code for u in udise_values],
-            "school_admin_username": school_admin.username if school_admin else None,
-            "school_admin_full_name": school_admin.full_name if school_admin else None,
-            "school_admin_designation": school_admin.designation if school_admin else None,
+            "subscription_id": str(subscription.id) if subscription else None,
+            "activation_status": "not_required" if trial_access else ("pending" if subscription else "subscription_pending"),
         },
         request=request,
         target_organization_id=organization.id,
@@ -467,23 +477,21 @@ async def set_school_status(
     payload: SchoolUpdate,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User, Depends(require_permissions("school.admin.edit"))],
+    user: Annotated[User, Depends(get_current_active_superuser)],
 ):
-    if not (user.is_superuser or user.account_type == "ORGANIZATION_ADMIN"):
-        raise HTTPException(
-            status_code=403,
-            detail="Only Organization Admin or Super Admin can change School status",
-        )
     school = await db.get(School, school_id)
     if not school or school.deleted_at is not None:
         raise HTTPException(status_code=404, detail="School not found")
-    if not user.is_superuser and school.organization_id != user.organization_id:
-        raise HTTPException(status_code=403, detail="School access denied")
     if payload.is_active is None:
         raise HTTPException(status_code=422, detail="is_active is required")
+    reason = (payload.reason or "").strip()
+    if len(reason) < 3:
+        raise HTTPException(status_code=422, detail="Reason is required")
     if payload.is_active and school.organization_id:
-        organization = await db.get(Organization, school.organization_id)
-        if not organization or organization.archived_at is not None:
+        organization, _subscription, _count, _limit = await _lock_and_check_school_capacity(
+            db, school.organization_id, adding_slot=False
+        )
+        if organization.archived_at is not None:
             raise HTTPException(
                 status_code=409,
                 detail="Organization is archived. Restore it before enabling this School.",
@@ -493,6 +501,23 @@ async def set_school_status(
                 status_code=409,
                 detail="Organization is disabled. Please activate the Organization before enabling this School.",
             )
+        entitlement = (
+            await db.execute(
+                select(SchoolSubscription)
+                .where(SchoolSubscription.school_id == school.id)
+                .order_by(SchoolSubscription.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if entitlement:
+            account = await db.get(
+                OrganizationSubscription, entitlement.organization_subscription_id
+            )
+            if account and account.billing_cycle != "trial" and entitlement.status != "active":
+                raise HTTPException(
+                    status_code=409,
+                    detail="School ERP activation is pending. Complete Organization Admin activation before enabling the School.",
+                )
     before = {"is_active": school.is_active}
     school.is_active = payload.is_active
     if not school.is_active:
@@ -506,6 +531,7 @@ async def set_school_status(
         entity_id=school.id,
         before=before,
         after={"is_active": school.is_active},
+        metadata={"reason": reason},
         request=request,
         target_organization_id=school.organization_id,
         target_school_id=school.id,
@@ -517,20 +543,14 @@ async def set_school_status(
 @router.post("/{school_id}/archive", response_model=SchoolOut)
 async def archive_school(
     school_id: UUID,
+    payload: SchoolLifecycleAction,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User, Depends(require_permissions("school.admin.edit"))],
+    user: Annotated[User, Depends(get_current_active_superuser)],
 ):
-    if not (user.is_superuser or user.account_type == "ORGANIZATION_ADMIN"):
-        raise HTTPException(
-            status_code=403,
-            detail="Only Organization Admin or Super Admin can archive Schools / Branches",
-        )
     school = await db.get(School, school_id)
     if not school or school.deleted_at is not None:
         raise HTTPException(status_code=404, detail="School not found")
-    if not user.is_superuser and school.organization_id != user.organization_id:
-        raise HTTPException(status_code=403, detail="School access denied")
     if school.is_active:
         raise HTTPException(status_code=409, detail="Disable the School before archiving it")
     archive_settings = get_settings()
@@ -562,7 +582,7 @@ async def archive_school(
         entity_id=school.id,
         before={"is_active": False, "archived_at": None, "code": school.code},
         after={"is_active": False, "archived_at": now.isoformat(), "code": school.code},
-        metadata={"sessions_revoked": revoked},
+        metadata={"sessions_revoked": revoked, "reason": payload.reason.strip()},
         request=request,
         target_organization_id=school.organization_id,
         target_school_id=school.id,
@@ -576,22 +596,15 @@ async def restore_school(
     school_id: UUID,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User, Depends(require_permissions("school.admin.edit"))],
+    user: Annotated[User, Depends(get_current_active_superuser)],
 ):
-    if not (user.is_superuser or user.account_type == "ORGANIZATION_ADMIN"):
-        raise HTTPException(
-            status_code=403,
-            detail="Only Organization Admin or Super Admin can restore Schools / Branches",
-        )
     school = await _load_school(db, school_id, include_deleted=True)
     if not school or school.deleted_at is None:
         raise HTTPException(status_code=404, detail="Archived School not found")
-    if not user.is_superuser and school.organization_id != user.organization_id:
-        raise HTTPException(status_code=403, detail="School access denied")
-    organization = (
-        await db.get(Organization, school.organization_id) if school.organization_id else None
+    organization, _subscription, _count, _limit = await _lock_and_check_school_capacity(
+        db, school.organization_id, adding_slot=True
     )
-    if organization and organization.archived_at is not None:
+    if organization.archived_at is not None:
         raise HTTPException(
             status_code=409, detail="Restore the Organization before restoring this School"
         )
@@ -609,6 +622,7 @@ async def restore_school(
         .scalars()
         .all()
     )
+    restored_rows: list[SchoolUDISECode] = []
     for row in udise_rows:
         conflict = (
             await db.execute(
@@ -621,12 +635,24 @@ async def restore_school(
             )
         ).scalar_one_or_none()
         if conflict:
+            row.is_active = False
+            row.deleted_at = row.deleted_at or datetime.now(UTC)
+            row.is_primary = False
             skipped_udise += 1
             continue
         row.deleted_at = None
         row.is_active = True
-        row.is_primary = row.udise_code == school.udise_code
+        row.is_primary = False
+        restored_rows.append(row)
         restored_udise += 1
+    # Reconcile the legacy School.udise_code cache with the authoritative rows.
+    preferred = next((r for r in restored_rows if r.udise_code == school.udise_code), None)
+    primary_row = preferred or (restored_rows[0] if restored_rows else None)
+    if primary_row:
+        primary_row.is_primary = True
+        school.udise_code = primary_row.udise_code
+    else:
+        school.udise_code = None
     await record_audit(
         db,
         action="school.restored",
@@ -653,8 +679,7 @@ async def legacy_archive_school(
     user: Annotated[User, Depends(require_permissions("school.admin.edit"))],
 ):
     # Backward-compatible alias. No physical deletion is performed.
-    await archive_school(school_id, request, db, user)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    raise HTTPException(status_code=410, detail="Use the School archive action with a mandatory reason")
 
 
 @router.patch("/{school_id}/license", response_model=SchoolLicenseOut)
@@ -687,22 +712,33 @@ async def update_school_license(
             raise HTTPException(
                 status_code=409, detail=f"Modules not implemented yet: {', '.join(unavailable)}"
             )
-        try:
-            require_core_modules(payload.enabled_modules)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        allowed = (
-            set(organization.enabled_modules or [])
-            if organization
-            else set(payload.enabled_modules)
-        )
-        invalid = sorted(set(payload.enabled_modules) - allowed)
-        if invalid:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Modules not enabled for Organization: {', '.join(invalid)}",
-            )
-        lic.enabled_modules = sorted(set(payload.enabled_modules))
+        plan = await plan_for_school(db, school_id)
+        if plan:
+            account = (await db.execute(
+                select(OrganizationSubscription)
+                .join(SchoolSubscription, SchoolSubscription.organization_subscription_id == OrganizationSubscription.id)
+                .where(SchoolSubscription.school_id == school_id)
+                .order_by(SchoolSubscription.created_at.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+            expected = set(effective_modules(plan, trial=bool(account and account.billing_cycle == "trial"))) & IMPLEMENTED_MODULES
+            requested = set(payload.enabled_modules)
+            if requested != expected:
+                missing = sorted(expected - requested)
+                extra = sorted(requested - expected)
+                parts = []
+                if missing:
+                    parts.append(f"missing plan modules: {', '.join(missing)}")
+                if extra:
+                    parts.append(f"modules outside plan: {', '.join(extra)}")
+                raise HTTPException(status_code=409, detail="School modules must exactly match the assigned plan (" + "; ".join(parts) + ")")
+            lic.enabled_modules = sorted(expected)
+        else:
+            allowed = set(organization.enabled_modules or []) if organization else set(payload.enabled_modules)
+            invalid = sorted(set(payload.enabled_modules) - allowed)
+            if invalid:
+                raise HTTPException(status_code=422, detail=f"Modules not enabled for Organization: {', '.join(invalid)}")
+            lic.enabled_modules = sorted(set(payload.enabled_modules))
     if payload.max_users is not None:
         lic.max_users = payload.max_users
     if payload.expires_at is not None:
@@ -718,6 +754,24 @@ async def update_school_license(
             )
         lic.expires_at = payload.expires_at
     if payload.is_active is not None:
+        if payload.is_active:
+            entitlement = (
+                await db.execute(
+                    select(SchoolSubscription)
+                    .where(SchoolSubscription.school_id == school.id)
+                    .order_by(SchoolSubscription.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if entitlement:
+                account = await db.get(
+                    OrganizationSubscription, entitlement.organization_subscription_id
+                )
+                if account and account.billing_cycle != "trial" and entitlement.status != "active":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Paid School license cannot be enabled before Organization Admin ERP activation",
+                    )
         lic.is_active = payload.is_active
         if not lic.is_active:
             await revoke_school_sessions(db, school.id, "school_license_disabled")
@@ -746,6 +800,57 @@ async def update_school_license(
     data["is_valid"] = lic.is_valid()
     return SchoolLicenseOut(**data)
 
+
+
+@router.post("/{school_id}/logo", response_model=SchoolOut)
+async def upload_school_logo(
+    school_id: UUID,
+    file: Annotated[UploadFile, File()],
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permissions("school.config.edit"))],
+):
+    school = await ensure_school_access(current_user, db, school_id)
+    if (
+        current_user.account_type not in {"SUPER_ADMIN", "ORGANIZATION_ADMIN", "SCHOOL_ADMIN"}
+        and not current_user.is_superuser
+    ):
+        raise HTTPException(status_code=403, detail="School logo upload access denied")
+    allowed = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+    content_type = (file.content_type or "").lower()
+    if content_type not in allowed:
+        raise HTTPException(status_code=422, detail="Logo must be PNG, JPG or WEBP")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="Logo file is empty")
+    if len(data) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Logo file must be 2 MB or smaller")
+    upload_root = Path(get_settings().upload_dir) / "logos" / str(school.id)
+    upload_root.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid4().hex}{allowed[content_type]}"
+    path = upload_root / filename
+    path.write_bytes(data)
+    logo_url = f"/uploads/logos/{school.id}/{filename}"
+    config = (await db.execute(select(SchoolConfiguration).where(SchoolConfiguration.school_id == school.id))).scalar_one_or_none()
+    if not config:
+        raise HTTPException(status_code=404, detail="School profile not found")
+    before = {"logo_url": config.logo_url}
+    config.logo_url = logo_url
+    await record_audit(
+        db,
+        action="school.logo.uploaded",
+        user=current_user,
+        module="school_admin",
+        entity_type="School",
+        entity_id=school.id,
+        before=before,
+        after={"logo_url": logo_url, "content_type": content_type},
+        request=request,
+        target_organization_id=school.organization_id,
+        target_school_id=school.id,
+    )
+    await db.flush()
+    return _require_reloaded_school(await _load_school(db, school.id))
 
 @router.patch("/{school_id}/profile", response_model=SchoolOut)
 async def update_school_profile(
@@ -780,11 +885,21 @@ async def update_school_profile(
     if not config:
         raise HTTPException(status_code=404, detail="School profile not found")
     changes = payload.configuration.model_dump(exclude_unset=True)
-    # ERP code/area short code is immutable after School creation.
-    if "area_code" in changes and changes["area_code"] != config.area_code:
-        raise HTTPException(
-            status_code=409, detail="ERP Area Short Code is immutable after School creation"
-        )
+    # School identity is immutable through normal Edit School.
+    identity_fields = {"name", "short_name", "area", "area_code"}
+    changed_identity = [field for field in identity_fields if field in changes and changes[field] != getattr(config, field)]
+    if changed_identity:
+        raise HTTPException(status_code=409, detail="School identity fields are locked after creation")
+    required_fields = {"board", "email", "phone", "address_line1", "city", "district", "state", "pincode"}
+    for field in required_fields:
+        value = changes.get(field, getattr(config, field, None))
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise HTTPException(status_code=422, detail=f"{field.replace('_', ' ').title()} is required")
+    pincode = str(changes.get("pincode", config.pincode) or "")
+    if not (len(pincode) == 6 and pincode.isdigit()):
+        raise HTTPException(status_code=422, detail="PIN Code must be exactly 6 digits")
+    if changes.get("board", config.board) not in {"State Board", "CBSE", "ICSE"}:
+        raise HTTPException(status_code=422, detail="Board/Curriculum must be State Board, CBSE or ICSE")
     before = {field: getattr(config, field) for field in changes}
     for field, value in changes.items():
         setattr(config, field, value)
@@ -800,7 +915,17 @@ async def update_school_profile(
     )
     before_udise = list(before_udise_result.scalars().all())
     if payload.udise_codes is not None:
-        await _replace_udise_codes(db, school, payload.udise_codes)
+        if not current_user.is_superuser:
+            requested_udise = sorted(
+                item.udise_code.strip() for item in payload.udise_codes if item.udise_code.strip()
+            )
+            if requested_udise != sorted(before_udise):
+                raise HTTPException(
+                    status_code=403,
+                    detail="UDISE identifiers are governed by Platform Owner and cannot be changed by School/Organization Admin",
+                )
+        else:
+            await _replace_udise_codes(db, school, payload.udise_codes)
     await db.flush()
     after_udise_result = await db.execute(
         select(SchoolUDISECode.udise_code).where(
@@ -863,10 +988,14 @@ async def update_school_configuration(
     if not config:
         raise HTTPException(status_code=404, detail="School profile not found")
     update_data = payload.model_dump(exclude_unset=True)
-    if "area_code" in update_data and update_data["area_code"] != config.area_code:
-        raise HTTPException(
-            status_code=409, detail="ERP Area Short Code is immutable after School creation"
-        )
+    identity_fields = {"name", "short_name", "area", "area_code"}
+    if any(field in update_data and update_data[field] != getattr(config, field) for field in identity_fields):
+        raise HTTPException(status_code=409, detail="School identity fields are locked after creation")
+    required_fields = {"board", "email", "phone", "address_line1", "city", "district", "state", "pincode"}
+    for field in required_fields:
+        value = update_data.get(field, getattr(config, field, None))
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise HTTPException(status_code=422, detail=f"{field.replace('_', ' ').title()} is required")
     before = {field: getattr(config, field) for field in update_data}
     for field, value in update_data.items():
         setattr(config, field, value)

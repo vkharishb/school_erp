@@ -5,7 +5,6 @@ from app.models.license import SchoolLicense
 from app.models.organization import Organization
 from app.models.school import School
 from app.models.user import User
-from app.services.licensing import CORE_MODULES
 
 
 async def effective_enabled_modules(db: AsyncSession, user: User) -> list[str]:
@@ -22,7 +21,7 @@ async def effective_enabled_modules(db: AsyncSession, user: User) -> list[str]:
     if user.account_type == "ORGANIZATION_ADMIN" and user.organization_id:
         organization = await db.get(Organization, user.organization_id)
         return (
-            sorted(set(organization.enabled_modules or []) | CORE_MODULES) if organization else []
+            sorted(set(organization.enabled_modules or [])) if organization else []
         )
 
     if not user.school_id:
@@ -34,7 +33,7 @@ async def effective_enabled_modules(db: AsyncSession, user: User) -> list[str]:
     if not school_license or not school_license.is_valid():
         return []
 
-    school_modules = set(school_license.enabled_modules or []) | CORE_MODULES
+    school_modules = set(school_license.enabled_modules or [])
     organization_id = user.organization_id
     if not organization_id:
         school = await db.get(School, user.school_id)
@@ -45,5 +44,5 @@ async def effective_enabled_modules(db: AsyncSession, user: User) -> list[str]:
     organization = await db.get(Organization, organization_id)
     if not organization:
         return []
-    organization_modules = set(organization.enabled_modules or []) | CORE_MODULES
+    organization_modules = set(organization.enabled_modules or [])
     return sorted(school_modules & organization_modules)

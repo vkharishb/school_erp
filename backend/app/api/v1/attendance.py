@@ -131,6 +131,9 @@ async def list_teacher_attendance(
 ):
     await ensure_school_access(user, db, school_id)
     await ensure_license_valid(school_id, db, "attendance")
+    # Teacher attendance is part of the full Attendance entitlement and also
+    # requires Teacher Management. BASIC therefore remains student-attendance only.
+    await ensure_license_valid(school_id, db, "teacher")
     query = select(TeacherAttendance).where(
         TeacherAttendance.school_id == school_id,
         TeacherAttendance.attendance_date == attendance_date,
@@ -151,6 +154,7 @@ async def mark_teacher_attendance(
 ):
     await ensure_school_access(user, db, school_id)
     await ensure_license_valid(school_id, db, "attendance")
+    await ensure_license_valid(school_id, db, "teacher")
     output: list[TeacherAttendance] = []
     audit_changes: list[tuple[TeacherAttendance, str, dict | None, dict]] = []
     for mark in payload.records:

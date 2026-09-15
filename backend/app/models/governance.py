@@ -22,7 +22,7 @@ class SchoolCodeRegistry(Base):
 
     __tablename__ = "school_code_registry"
     __table_args__ = (
-        UniqueConstraint("organization_id", "code", name="uq_school_code_registry_org_code"),
+        UniqueConstraint("code", name="uq_school_code_registry_code"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

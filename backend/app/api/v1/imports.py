@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import (
     ensure_campus_access,
+    ensure_download_allowed,
     ensure_license_valid,
     ensure_school_access,
     require_permissions,
@@ -1330,6 +1331,7 @@ async def class_section_import_template(
     ],
 ):
     await ensure_school_access(actor, db, school_id)
+    await ensure_download_allowed(school_id, db)
     return FileResponse(
         TEMPLATE_DIR / "classes-sections-import.xlsx",
         filename="classes-sections-import.xlsx",
@@ -1441,6 +1443,7 @@ async def class_import_template(
     actor: Annotated[User, Depends(require_permissions("academic_class.bulk_upload"))],
 ):
     await ensure_school_access(actor, db, school_id)
+    await ensure_download_allowed(school_id, db)
     return FileResponse(
         TEMPLATE_DIR / "classes-import.xlsx",
         filename="classes-import.xlsx",
@@ -1522,6 +1525,7 @@ async def section_import_template(
     actor: Annotated[User, Depends(require_permissions("section.bulk_upload"))],
 ):
     await ensure_school_access(actor, db, school_id)
+    await ensure_download_allowed(school_id, db)
     return FileResponse(
         TEMPLATE_DIR / "sections-import.xlsx",
         filename="sections-import.xlsx",
@@ -1621,6 +1625,7 @@ async def student_template(
     campus_id: UUID = Query(...),
 ):
     await _student_context(db, actor, school_id, campus_id)
+    await ensure_download_allowed(school_id, db)
     years, classes, sections, _, _, _ = await _student_reference_catalog(db, campus_id)
     class_by_id = {item.id: item for item in classes}
 
@@ -1843,6 +1848,7 @@ async def teacher_template(
 ):
     await ensure_school_access(actor, db, school_id)
     await ensure_license_valid(school_id, db, "teacher")
+    await ensure_download_allowed(school_id, db)
     return FileResponse(
         TEMPLATE_DIR / "teachers-import.xlsx",
         filename="teachers-import.xlsx",
@@ -1928,6 +1934,7 @@ async def fee_structure_template(
 ):
     await ensure_school_access(actor, db, school_id)
     await ensure_license_valid(school_id, db, "fee")
+    await ensure_download_allowed(school_id, db)
     return FileResponse(
         TEMPLATE_DIR / "fee-structures-import.xlsx",
         filename="fee-structures-import.xlsx",
@@ -2015,6 +2022,7 @@ async def prior_dues_template(
 ):
     await ensure_school_access(actor, db, school_id)
     await ensure_license_valid(school_id, db, "fee")
+    await ensure_download_allowed(school_id, db)
     return FileResponse(
         TEMPLATE_DIR / "prior-year-dues-import.xlsx",
         filename="prior-year-dues-import.xlsx",
@@ -2118,6 +2126,7 @@ async def marks_template(
     _, year, academic_class, section, subject = await _marks_context(
         db, actor, school_id, campus_id, academic_year_id, academic_class_id, section_id, subject_id
     )
+    await ensure_download_allowed(school_id, db)
     enrolled = await _enrolled_students(
         db, school_id, academic_year_id, academic_class_id, section_id
     )

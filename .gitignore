@@ -85,5 +85,4 @@ coverage/
 *.bak
 *.tmp
 *.temp
-*.cache/
-*.md
+.cache/

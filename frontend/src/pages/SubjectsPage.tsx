@@ -1,17 +1,15 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { academicApi, foundationApi } from "../services/api";
+import { academicApi } from "../services/api";
 import { useAuthStore } from "../store/authStore";
 import { hasPermission } from "../utils/permissions";
 import { apiErrorMessage } from "../utils/apiError";
-import type { Campus, Subject } from "../types";
+import type { Subject } from "../types";
 
 export default function SubjectsPage() {
   const { schoolId = "" } = useParams();
   const user = useAuthStore((s) => s.user);
   const canManage = hasPermission(user, "subject.manage");
-  const [campuses, setCampuses] = useState<Campus[]>([]);
-  const [campusId, setCampusId] = useState("");
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -19,24 +17,10 @@ export default function SubjectsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({ code: "", name: "" });
 
-  const loadCampuses = async () => {
-    try {
-      const items = await foundationApi.campuses(schoolId);
-      setCampuses(items);
-      setCampusId((current) => current || user?.campus_id || items[0]?.id || "");
-    } catch (err) {
-      setError(apiErrorMessage(err, "Failed to load campuses"));
-    }
-  };
-
-  useEffect(() => {
-    if (schoolId) void loadCampuses();
-  }, [schoolId, user?.campus_id]);
-
   const load = async () => {
-    if (!campusId) return;
+    if (!schoolId) return;
     try {
-      setSubjects(await academicApi.subjects(campusId));
+      setSubjects(await academicApi.subjects(schoolId));
     } catch (err) {
       setError(apiErrorMessage(err, "Failed to load subjects"));
     }
@@ -45,14 +29,14 @@ export default function SubjectsPage() {
   useEffect(() => {
     setEditingId(null);
     void load();
-  }, [campusId]);
+  }, [schoolId]);
 
   const create = async (event: FormEvent) => {
     event.preventDefault();
     setError("");
     setMessage("");
     try {
-      await academicApi.createSubject(campusId, { code: form.code.trim(), name: form.name.trim() });
+      await academicApi.createSubject(schoolId, { code: form.code.trim(), name: form.name.trim() });
       setForm({ code: "", name: "" });
       setMessage("Subject created.");
       await load();
@@ -88,22 +72,12 @@ export default function SubjectsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold">Subjects</h1>
-        <p className="mt-1 text-gray-500">Maintain the subject master for each campus.</p>
+        <p className="mt-1 text-gray-500">Maintain the subject master for this School.</p>
       </div>
       {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
       {message && <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">{message}</div>}
 
-      <section className="card">
-        <label>
-          <span className="label">Campus / Branch</span>
-          <select className="input max-w-md" value={campusId} onChange={(e) => setCampusId(e.target.value)}>
-            <option value="">Select campus</option>
-            {campuses.map((campus) => <option key={campus.id} value={campus.id}>{campus.name}</option>)}
-          </select>
-        </label>
-      </section>
-
-      {canManage && campusId && (
+      {canManage && schoolId && (
         <form onSubmit={create} className="card grid grid-cols-1 gap-4 md:grid-cols-3">
           <label><span className="label">Subject Code</span><input className="input" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} required /></label>
           <label><span className="label">Subject Name</span><input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required /></label>

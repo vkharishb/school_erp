@@ -39,19 +39,26 @@ async def list_audit_events(
     if target_school:
         await ensure_school_access(user, db, target_school)
         query = (
-            select(AuditEvent, User.full_name, User.username, User.account_type)
+            select(AuditEvent, User.full_name, User.username, User.account_type, User.is_superuser)
             .outerjoin(User, User.id == AuditEvent.user_id)
             .where(AuditEvent.school_id == target_school)
         )
+        if not user.is_superuser:
+            # School Admins may see school-operational actors, never Platform/Org governance actors.
+            query = query.where(
+                (User.id.is_(None))
+                | ((User.is_superuser.is_(False)) & (User.account_type != "ORGANIZATION_ADMIN"))
+            )
     elif user.is_superuser:
-        query = select(AuditEvent, User.full_name, User.username, User.account_type).outerjoin(
+        query = select(AuditEvent, User.full_name, User.username, User.account_type, User.is_superuser).outerjoin(
             User, User.id == AuditEvent.user_id
         )
     elif "ORGANIZATION_ADMIN" in get_role_codes(user):
         query = (
-            select(AuditEvent, User.full_name, User.username, User.account_type)
+            select(AuditEvent, User.full_name, User.username, User.account_type, User.is_superuser)
             .outerjoin(User, User.id == AuditEvent.user_id)
             .where(AuditEvent.organization_id == user.organization_id)
+            .where((User.id.is_(None)) | (User.is_superuser.is_(False)))
         )
     else:
         raise HTTPException(status_code=403, detail="Audit scope is not assigned")
@@ -74,5 +81,5 @@ async def list_audit_events(
             "metadata": item.metadata_json,
             "created_at": item.created_at.isoformat(),
         }
-        for item, user_name, username, account_type in result.all()
+        for item, user_name, username, account_type, _actor_is_superuser in result.all()
     ]

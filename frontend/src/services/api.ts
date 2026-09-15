@@ -1,5 +1,5 @@
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
-import type { AccountType, AcademicClass, AcademicYear, Campus, Charge, FeeHead, FeeStructure, Organization, OrganizationAcademicYear, OrganizationDashboard, School, SchoolConfiguration, SchoolLicense, Student, TokenResponse, User, Section, Teacher, AttendanceRecord, SchoolDashboardSummary, Subject, MarkRecord, RbacPermission, RbacRole, AssignableRole, ImportPreview, ImportResult, ReportResult, ERPAccessPolicy, ERPAccessResult, LinkedStudent, ParentStudentPortalSummary, FeeAccountStudent } from "../types";
+import type { AccountType, AcademicClass, AcademicYear, Campus, Charge, FeeHead, FeeStructure, Organization, OrganizationAcademicYear, OrganizationDashboard, School, SchoolConfiguration, SchoolLicense, Student, TokenResponse, User, Section, Teacher, AttendanceRecord, SchoolDashboardSummary, Subject, MarkRecord, RbacPermission, RbacRole, AssignableRole, ImportPreview, ImportResult, ReportResult, ERPAccessPolicy, ERPAccessResult, LinkedStudent, ParentStudentPortalSummary, FeeAccountStudent, SubscriptionPlan, OrganizationSubscription, SchoolSubscription, SubscriptionPayment, PaymentSummary, ActivationSchool, SubscriptionReminder, ActivationKey, PlannerAgenda, PlannerItem } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api/v1";
 const api = axios.create({ baseURL: API_BASE, withCredentials: true });
@@ -10,18 +10,6 @@ export function setAccessToken(token: string | null) { accessToken = token; }
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   if (accessToken) config.headers.Authorization = `Bearer ${accessToken}`;
 
-  const method = (config.method || "get").toUpperCase();
-  const url = config.url || "";
-  const mutating = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
-  const exempt = url.includes("/auth/login") || url.includes("/auth/refresh") || url.includes("/auth/logout") || url.includes("/auth/change-password") || url.includes("/system/development-reset") || url.endsWith("/preview");
-  if (mutating && !exempt && !config.headers["X-Change-Confirmed"]) {
-    const confirmed = window.confirm("Do you want to continue with this change?");
-    if (!confirmed) throw new axios.CanceledError("Change cancelled by user");
-    const reason = (window.prompt("Reason for this change (required):") || "").trim();
-    if (reason.length < 3) throw new axios.CanceledError("A reason is required for every change");
-    config.headers["X-Change-Confirmed"] = "true";
-    config.headers["X-Change-Reason"] = reason;
-  }
   return config;
 });
 
@@ -66,17 +54,19 @@ export const authApi = {
   me: async (): Promise<User> => (await api.get<User>("/auth/me")).data,
   logout: async (): Promise<void> => { await api.post("/auth/logout"); },
   changePassword: async (currentPassword:string, newPassword:string): Promise<void> => { await api.post("/auth/change-password", { current_password: currentPassword, new_password: newPassword }); },
+  updateProfile: async (payload:{full_name:string;designation?:string|null;email?:string|null;phone?:string|null}): Promise<User> => (await api.patch<User>("/auth/me/profile", payload)).data,
 };
 
 export const schoolApi = {
   list: async (includeArchived=false): Promise<School[]> => (await api.get<School[]>("/schools", {params: includeArchived ? {include_archived:true} : undefined})).data,
   get: async (id: string): Promise<School> => (await api.get<School>(`/schools/${id}`)).data,
   getLicense: async (id: string): Promise<SchoolLicense> => (await api.get<SchoolLicense>(`/schools/${id}/license`)).data,
-  create: async (payload: { organization_id: string; admin?: {full_name:string;designation:"Principal"|"Headmaster"|"School Administrator";username:string;email?:string|null;phone?:string|null;password:string}; configuration: Partial<SchoolConfiguration> & { name: string; area: string }; udise_codes?: {udise_code:string;label?:string|null;is_primary?:boolean}[]; max_users?: number; enabled_modules?: string[]; license_expires_at?: string }): Promise<School> => (await api.post<School>("/schools", payload)).data,
+  create: async (payload: { organization_id: string; configuration: Partial<SchoolConfiguration> & { name:string; short_name:string; area:string; area_code:string; board:"State Board"|"CBSE"|"ICSE"; email:string; phone:string; address_line1:string; city:string; district:string; state:string; pincode:string }; udise_codes?: {udise_code:string;label?:string|null;is_primary?:boolean}[]; max_users?: number; enabled_modules?: string[]; license_expires_at?: string }): Promise<School> => (await api.post<School>("/schools", payload)).data,
   updateProfile: async (schoolId: string, payload: Record<string, unknown>): Promise<School> => (await api.patch<School>(`/schools/${schoolId}/profile`, payload)).data,
+  uploadLogo: async (schoolId: string, file: File): Promise<School> => { const data = new FormData(); data.append("file", file); return (await api.post<School>(`/schools/${schoolId}/logo`, data, { headers: { "Content-Type": "multipart/form-data" } })).data; },
   updateConfiguration: async (schoolId: string, payload: Partial<SchoolConfiguration>): Promise<SchoolConfiguration> => (await api.patch<SchoolConfiguration>(`/schools/${schoolId}/configuration`, payload)).data,
-  setStatus: async (schoolId: string, is_active: boolean): Promise<School> => (await api.patch<School>(`/schools/${schoolId}/status`, { is_active })).data,
-  archive: async (schoolId: string): Promise<School> => (await api.post<School>(`/schools/${schoolId}/archive`)).data,
+  setStatus: async (schoolId: string, is_active: boolean, reason: string): Promise<School> => (await api.patch<School>(`/schools/${schoolId}/status`, { is_active, reason })).data,
+  archive: async (schoolId: string, reason: string): Promise<School> => (await api.post<School>(`/schools/${schoolId}/archive`, { reason })).data,
   restore: async (schoolId: string): Promise<School> => (await api.post<School>(`/schools/${schoolId}/restore`)).data,
   delete: async (schoolId: string): Promise<void> => { await api.delete(`/schools/${schoolId}`); },
   updateLicense: async (schoolId: string, payload: { enabled_modules?: string[]; max_users?: number; expires_at?: string; is_active?: boolean }): Promise<SchoolLicense> => (await api.patch<SchoolLicense>(`/schools/${schoolId}/license`, payload)).data,
@@ -84,10 +74,12 @@ export const schoolApi = {
 
 export const organizationApi = {
   list: async (includeArchived=false): Promise<Organization[]> => (await api.get<Organization[]>("/organizations", {params: includeArchived ? {include_archived:true} : undefined})).data,
-  create: async (payload: { name:string; allowed_schools:number; head_full_name:string; head_email:string; head_phone?:string|null; admin_username:string; admin_email:string; admin_password:string; admin_designation:"Secretary and Correspondent"|"Chairman" }): Promise<Organization> => (await api.post<Organization>("/organizations", payload)).data,
+  create: async (payload: { name:string; allowed_schools:number; head_full_name:string; head_email:string; head_phone?:string|null; admin_username:string; admin_email?:string|null; admin_designation:string; subscription_plan_id?:string; billing_cycle?:string; discount_type?:string; discount_value?:string; discount_reason?:string|null; tax_mode?:string; tax_rate?:string; activation_minimum_amount?:string|null; activation_override_reason?:string|null; payment_due_at?:string|null; subscription_notes?:string|null }): Promise<Organization> => (await api.post<Organization>("/organizations", payload)).data,
   update: async (organizationId:string, payload:Record<string,unknown>): Promise<Organization> => (await api.patch<Organization>(`/organizations/${organizationId}`, payload)).data,
   dashboard: async (organizationId: string): Promise<OrganizationDashboard> => (await api.get<OrganizationDashboard>(`/organizations/${organizationId}/dashboard`)).data,
-  setStatus: async (organizationId: string, is_active: boolean): Promise<Organization> => (await api.patch<Organization>(`/organizations/${organizationId}/status`, { is_active })).data,
+  setStatus: async (organizationId: string, is_active: boolean, reason:string, emergency_override=false): Promise<Organization> => (await api.patch<Organization>(`/organizations/${organizationId}/status`, { is_active, reason, emergency_override })).data,
+  resetAdminTemporaryPassword: async (organizationId:string):Promise<{temporary_password:string;username:string;email?:string|null}> => (await api.post(`/organizations/${organizationId}/admin/reset-temporary-password`)).data,
+  resendAdminEmail: async (organizationId:string):Promise<{status:string}> => (await api.post(`/organizations/${organizationId}/admin/resend-email`)).data,
   archive: async (organizationId: string): Promise<Organization> => (await api.post<Organization>(`/organizations/${organizationId}/archive`)).data,
   restore: async (organizationId: string): Promise<Organization> => (await api.post<Organization>(`/organizations/${organizationId}/restore`)).data,
   updateLicense: async (organizationId: string, payload: { enabled_modules?: string[]; license_expires_at?: string }): Promise<Organization> => (await api.patch<Organization>(`/organizations/${organizationId}/license`, payload)).data,
@@ -97,20 +89,64 @@ export const organizationApi = {
   activateAcademicYear: async (academicYearId:string): Promise<OrganizationAcademicYear> => (await api.post<OrganizationAcademicYear>(`/organizations/academic-years/${academicYearId}/activate`)).data,
 };
 
+export const subscriptionApi = {
+  plans: async ():Promise<SubscriptionPlan[]> => (await api.get<SubscriptionPlan[]>("/subscriptions/plans")).data,
+  createPlan: async (payload:Record<string,unknown>):Promise<SubscriptionPlan> => (await api.post<SubscriptionPlan>("/subscriptions/plans",payload)).data,
+  updatePlan: async (id:string,payload:Record<string,unknown>):Promise<SubscriptionPlan> => (await api.patch<SubscriptionPlan>(`/subscriptions/plans/${id}`,payload)).data,
+  deletePlan: async (id:string):Promise<void> => { await api.delete(`/subscriptions/plans/${id}`); },
+  accounts: async ():Promise<OrganizationSubscription[]> => (await api.get<OrganizationSubscription[]>("/subscriptions/accounts")).data,
+  createAccount: async (payload:Record<string,unknown>):Promise<OrganizationSubscription> => (await api.post<OrganizationSubscription>("/subscriptions/accounts",payload)).data,
+  updateAccount: async (id:string,payload:Record<string,unknown>):Promise<OrganizationSubscription> => (await api.patch<OrganizationSubscription>(`/subscriptions/accounts/${id}`,payload)).data,
+  schools: async ():Promise<SchoolSubscription[]> => (await api.get<SchoolSubscription[]>("/subscriptions/schools")).data,
+  generateKey: async (id:string,validity_hours=72):Promise<{activation_code:string;masked_code:string;valid_until:string}> => (await api.post(`/subscriptions/schools/${id}/activation-keys`,{validity_hours})).data,
+  activationKeys: async (id:string):Promise<ActivationKey[]> => (await api.get<ActivationKey[]>(`/subscriptions/schools/${id}/activation-keys`)).data,
+  revokeKey: async (id:string,reason:string):Promise<ActivationKey> => (await api.post<ActivationKey>(`/subscriptions/activation-keys/${id}/revoke`,{reason})).data,
+  disableSchool: async (id:string,reason:string):Promise<SchoolSubscription> => (await api.post<SchoolSubscription>(`/subscriptions/schools/${id}/disable`,{reason})).data,
+  remind: async (id:string,message?:string):Promise<SubscriptionReminder> => (await api.post<SubscriptionReminder>(`/subscriptions/accounts/${id}/reminders`,{message:message||null})).data,
+  renew: async (id:string,payload:{renewal_start_date:string;communicated_with:string;communication_method:string;remarks?:string|null}):Promise<OrganizationSubscription> => (await api.post<OrganizationSubscription>(`/subscriptions/accounts/${id}/renew`,payload)).data,
+  extend: async (id:string,payload:{new_end_date:string;reason:string;communicated_with:string;communication_method:string;remarks?:string|null}):Promise<OrganizationSubscription> => (await api.post<OrganizationSubscription>(`/subscriptions/accounts/${id}/extend`,payload)).data,
+  convertTrial: async (id:string,payloadOrPlanId:Record<string,unknown>|string,billing_cycle?:"monthly"|"yearly",school_count=1):Promise<OrganizationSubscription> => { const payload=typeof payloadOrPlanId==="string"?{plan_id:payloadOrPlanId,billing_cycle,school_count,due_at:new Date().toISOString()}:payloadOrPlanId; return (await api.post<OrganizationSubscription>(`/subscriptions/accounts/${id}/convert-trial`,payload)).data; },
+  mySchools: async ():Promise<ActivationSchool[]> => (await api.get<ActivationSchool[]>("/subscriptions/activation/my-schools")).data,
+  myReminders: async ():Promise<SubscriptionReminder[]> => (await api.get<SubscriptionReminder[]>("/subscriptions/activation/my-reminders")).data,
+  activationTerms: async ():Promise<{version:string;url?:string|null}> => (await api.get("/subscriptions/activation/terms")).data,
+  activate: async (school_id:string,activation_code:string,terms_accepted:boolean,terms_version:string) => (await api.post("/subscriptions/activation/activate",{school_id,activation_code,terms_accepted,terms_version})).data,
+};
+
+
+export const plannerApi = {
+  agenda: async (days=30): Promise<PlannerAgenda> => (await api.get<PlannerAgenda>("/planner/agenda", { params: { days } })).data,
+  items: async (status?: string): Promise<PlannerItem[]> => (await api.get<PlannerItem[]>("/planner/items", { params: status ? { status } : undefined })).data,
+  create: async (payload: Record<string, unknown>): Promise<PlannerItem> => (await api.post<PlannerItem>("/planner/items", payload)).data,
+  update: async (id: string, payload: Record<string, unknown>): Promise<PlannerItem> => (await api.patch<PlannerItem>(`/planner/items/${id}`, payload)).data,
+  complete: async (id: string): Promise<PlannerItem> => (await api.post<PlannerItem>(`/planner/items/${id}/complete`)).data,
+};
+export const platformPaymentsApi = {
+  summary: async ():Promise<PaymentSummary> => (await api.get<PaymentSummary>("/payments/summary")).data,
+  details: async ():Promise<OrganizationSubscription[]> => (await api.get<OrganizationSubscription[]>("/payments/details")).data,
+  receipts: async ():Promise<SubscriptionPayment[]> => (await api.get<SubscriptionPayment[]>("/payments/receipts")).data,
+  receipt: async (id:string):Promise<Record<string,any>> => (await api.get(`/payments/receipts/${id}`)).data,
+  record: async (id:string,payload:{amount:string;payment_mode:string;reference_number?:string;notes?:string}) => (await api.post<SubscriptionPayment>(`/payments/details/${id}/payments`,payload)).data,
+  statement: async (id:string) => (await api.get(`/payments/financial-details/${id}`)).data,
+  settings: async ():Promise<Record<string,any>> => (await api.get("/payments/settings")).data,
+  updateSettings: async (payload:Record<string,unknown>):Promise<Record<string,any>> => (await api.patch("/payments/settings",payload)).data,
+};
+
 export const foundationApi = {
   campuses: async (schoolId: string): Promise<Campus[]> => (await api.get<Campus[]>(`/foundation/schools/${schoolId}/campuses`)).data,
   academicYears: async (campusId: string): Promise<AcademicYear[]> => (await api.get<AcademicYear[]>(`/foundation/campuses/${campusId}/academic-years`)).data,
 };
 
 export const academicApi = {
-  classes: async (campusId: string): Promise<AcademicClass[]> => (await api.get<AcademicClass[]>(`/students/campuses/${campusId}/classes`)).data,
-  createClass: async (campusId:string, payload:{code:string;name:string}): Promise<AcademicClass> => (await api.post<AcademicClass>(`/students/campuses/${campusId}/classes`, payload)).data,
+  legacyClasses: async (campusId: string): Promise<AcademicClass[]> => (await api.get<AcademicClass[]>(`/students/campuses/${campusId}/classes`)).data,
+  classes: async (schoolId: string): Promise<AcademicClass[]> => (await api.get<AcademicClass[]>(`/students/schools/${schoolId}/classes`)).data,
+  createClass: async (schoolId:string, payload:{code:string;name:string}): Promise<AcademicClass> => (await api.post<AcademicClass>(`/students/schools/${schoolId}/classes`, payload)).data,
   updateClass: async (classId:string, payload:{code?:string;name?:string}): Promise<AcademicClass> => (await api.patch<AcademicClass>(`/students/classes/${classId}`, payload)).data,
   sections: async (classId: string): Promise<Section[]> => (await api.get<Section[]>(`/students/classes/${classId}/sections`)).data,
   createSection: async (classId:string, payload:{code:string;name:string}): Promise<Section> => (await api.post<Section>(`/students/classes/${classId}/sections`, payload)).data,
   updateSection: async (sectionId:string, payload:{code?:string;name?:string}): Promise<Section> => (await api.patch<Section>(`/students/sections/${sectionId}`, payload)).data,
-  subjects: async (campusId: string): Promise<Subject[]> => (await api.get<Subject[]>(`/students/campuses/${campusId}/subjects`)).data,
-  createSubject: async (campusId:string, payload:{code:string;name:string}): Promise<Subject> => (await api.post<Subject>(`/students/campuses/${campusId}/subjects`, payload)).data,
+  legacySubjects: async (campusId: string): Promise<Subject[]> => (await api.get<Subject[]>(`/students/campuses/${campusId}/subjects`)).data,
+  subjects: async (schoolId: string): Promise<Subject[]> => (await api.get<Subject[]>(`/students/schools/${schoolId}/subjects`)).data,
+  createSubject: async (schoolId:string, payload:{code:string;name:string}): Promise<Subject> => (await api.post<Subject>(`/students/schools/${schoolId}/subjects`, payload)).data,
   updateSubject: async (subjectId:string, payload:{code?:string;name?:string}): Promise<Subject> => (await api.patch<Subject>(`/students/subjects/${subjectId}`, payload)).data,
 };
 
@@ -169,7 +205,7 @@ export const userAdminApi = {
   list: async (params?: { organization_id?: string; school_id?: string; campus_id?: string; include_organization_admins?: boolean }): Promise<User[]> => (await api.get<User[]>("/users", { params })).data,
   create: async (payload: Record<string, unknown>): Promise<User> => (await api.post<User>("/users", payload)).data,
   update: async (userId: string, payload: Record<string, unknown>): Promise<User> => (await api.patch<User>(`/users/${userId}`, payload)).data,
-  resetPassword: async (userId: string, newPassword: string): Promise<void> => { await api.post(`/users/${userId}/reset-password`, { new_password: newPassword }); },
+  resetPassword: async (userId: string): Promise<{username:string;temporary_password:string}> => (await api.post<{username:string;temporary_password:string}>(`/users/${userId}/reset-password`)).data,
 };
 
 export const marksApi = {
@@ -221,7 +257,7 @@ export interface AuditEventRow {
 }
 
 export const auditApi = {
-  list: async (schoolId:string): Promise<AuditEventRow[]> => (await api.get('/audit', {params:{school_id:schoolId,limit:200}})).data,
+  list: async (schoolId?:string): Promise<AuditEventRow[]> => (await api.get('/audit', {params:{...(schoolId?{school_id:schoolId}:{}),limit:200}})).data,
 };
 
 export interface BackupItem { name:string; size_bytes:number; sha256:string; created_at:string; offsite?:{configured:boolean;synced:boolean;path?:string}; offsite_error?:string|null; }
@@ -231,7 +267,7 @@ export interface PlatformModuleStatus {
   code:string; name:string; phase:number; status:"ready_dev"|"in_progress"|"planned"; status_label:string; note:string; is_core:boolean;
 }
 export interface PlatformStatus {
-  platform_status:string; release:string; migration_head:string; phase:number; environment:string;
+  platform_status:string; release:string; migration_head:string; migration_current?:string; migration_status?:string; database_status?:string; api_status?:string; phase:number; environment:string;
   summary:{ready_dev:number;in_progress:number;planned:number;total:number}; modules:PlatformModuleStatus[];
 }
 export interface DevelopmentResetPreview {

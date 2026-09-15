@@ -3,7 +3,7 @@ import { useParams, useSearchParams } from "react-router-dom";
 import { Download, Printer, RefreshCw } from "lucide-react";
 import { academicApi, foundationApi, reportsApi, type ReportFilters } from "../services/api";
 import { useAuthStore } from "../store/authStore";
-import type { AcademicClass, AcademicYear, Campus, ReportResult, Section, Subject } from "../types";
+import type { AcademicClass, AcademicYear, ReportResult, Section, Subject } from "../types";
 import { hasModule, hasPermission } from "../utils/permissions";
 import { apiErrorMessage } from "../utils/apiError";
 
@@ -27,7 +27,7 @@ export default function ReportsPage(){
   const {schoolId=""}=useParams(); const user=useAuthStore(s=>s.user); const [searchParams]=useSearchParams();
   const query=searchParams.toString(); const requestedReport=searchParams.get("report")||"";
   const available=useMemo(()=>REPORTS.filter(r=>hasPermission(user,r.permission)&&hasModule(user,r.module)),[user]);
-  const [reportKey,setReportKey]=useState(requestedReport); const [campuses,setCampuses]=useState<Campus[]>([]); const [years,setYears]=useState<AcademicYear[]>([]); const [classes,setClasses]=useState<AcademicClass[]>([]); const [sections,setSections]=useState<Section[]>([]); const [subjects,setSubjects]=useState<Subject[]>([]);
+  const [reportKey,setReportKey]=useState(requestedReport); const [years,setYears]=useState<AcademicYear[]>([]); const [classes,setClasses]=useState<AcademicClass[]>([]); const [sections,setSections]=useState<Section[]>([]); const [subjects,setSubjects]=useState<Subject[]>([]);
   const [campusId,setCampusId]=useState(""); const [yearId,setYearId]=useState(""); const [classId,setClassId]=useState(""); const [sectionId,setSectionId]=useState(""); const [subjectId,setSubjectId]=useState("");
   const [assessment,setAssessment]=useState(""); const [status,setStatus]=useState(""); const [paymentMode,setPaymentMode]=useState(""); const [startDate,setStartDate]=useState(searchParams.get("start_date")||firstOfMonth()); const [endDate,setEndDate]=useState(searchParams.get("end_date")||today());
   const [report,setReport]=useState<ReportResult|null>(null); const [loading,setLoading]=useState(false); const [error,setError]=useState("");
@@ -35,8 +35,8 @@ export default function ReportsPage(){
   const canExport=hasPermission(user,"reports.export")&&(!reportKey.startsWith("fee_")||hasPermission(user,"fee.export"));
 
   useEffect(()=>{const requested=REPORTS.find(r=>r.key===requestedReport&&available.some(a=>a.key===r.key));setReportKey(current=>requested?.key||(available.some(r=>r.key===current)?current:available[0]?.key||""));},[available,requestedReport,query]);
-  useEffect(()=>{if(!schoolId)return;void foundationApi.campuses(schoolId).then(c=>{setCampuses(c);if(c.length===1)setCampusId(c[0].id);}).catch(e=>setError(apiErrorMessage(e,"Failed to load campuses")));},[schoolId]);
-  useEffect(()=>{setYearId("");setClassId("");setSectionId("");setSubjectId("");setYears([]);setClasses([]);setSections([]);setSubjects([]);if(!campusId)return;void Promise.all([foundationApi.academicYears(campusId),academicApi.classes(campusId),academicApi.subjects(campusId)]).then(([y,c,s])=>{setYears(y);setClasses(c);setSubjects(s);}).catch(e=>setError(apiErrorMessage(e,"Failed to load academic filters")));},[campusId]);
+  useEffect(()=>{if(!schoolId)return;void foundationApi.campuses(schoolId).then(c=>{setCampusId(c[0]?.id||"");}).catch(e=>setError(apiErrorMessage(e,"Failed to load campuses")));},[schoolId]);
+  useEffect(()=>{setYearId("");setClassId("");setSectionId("");setSubjectId("");setYears([]);setClasses([]);setSections([]);setSubjects([]);if(!campusId)return;void Promise.all([foundationApi.academicYears(campusId),academicApi.legacyClasses(campusId),academicApi.legacySubjects(campusId)]).then(([y,c,s])=>{setYears(y);setClasses(c);setSubjects(s);}).catch(e=>setError(apiErrorMessage(e,"Failed to load academic filters")));},[campusId]);
   useEffect(()=>{setSectionId("");setSections([]);if(classId)void academicApi.sections(classId).then(setSections).catch(e=>setError(apiErrorMessage(e,"Failed to load sections")));},[classId]);
   useEffect(()=>{setReport(null);setError("");},[reportKey]);
 
@@ -56,7 +56,6 @@ export default function ReportsPage(){
     <section className="card space-y-4">
       <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-4 gap-4">
         <Select label="Report" value={reportKey} onChange={v=>{setReportKey(v);setStatus("");setPaymentMode("");}} options={available.map(r=>[r.key,r.label])}/>
-        <Select label="Campus / Branch" value={campusId} onChange={setCampusId} options={campuses.map(c=>[c.id,c.name])} allLabel="All accessible campuses"/>
         {usesAcademic&&<Select label="Academic Year" value={yearId} onChange={v=>{setYearId(v);setClassId("");setSectionId("");}} options={years.map(y=>[y.id,y.name||y.code])} allLabel="All years"/>}
         {usesAcademic&&<Select label="Class" value={classId} onChange={setClassId} options={classes.map(c=>[c.id,c.name])} allLabel="All classes"/>}
         {usesAcademic&&<Select label="Section" value={sectionId} onChange={setSectionId} options={sections.map(s=>[s.id,s.name])} allLabel="All sections"/>}
@@ -66,7 +65,7 @@ export default function ReportsPage(){
         {reportKey==="fee_collections"&&<Select label="Payment Mode" value={paymentMode} onChange={setPaymentMode} options={[["cash","Cash"],["upi","UPI"]]} allLabel="All modes"/>}
         {usesStatus&&<Select label="Status" value={status} onChange={setStatus} options={reportKey==="fee_collections"?[["posted","Posted"],["cancelled","Cancelled"]]:[["active","Active"],["inactive","Inactive"]]} allLabel="All statuses"/>}
       </div>
-      {(classId||sectionId)&&!campusId&&<div className="text-sm text-amber-700">Select a campus before using class/section filters.</div>}
+      {(classId||sectionId)&&!campusId&&<div className="text-sm text-amber-700">Select the required academic filters before using class/section filters.</div>}
       <div className="flex flex-wrap gap-2"><button className="btn-primary inline-flex items-center gap-2" onClick={()=>void run()} disabled={loading}><RefreshCw size={16}/>{loading?"Generating…":"Generate Report"}</button>{canExport&&<button className="btn-secondary inline-flex items-center gap-2" onClick={()=>void exportXlsx()}><Download size={16}/>Export Excel</button>}<button className="btn-secondary inline-flex items-center gap-2" onClick={()=>window.print()}><Printer size={16}/>Print / Save PDF</button></div>
     </section>
     {report&&<>

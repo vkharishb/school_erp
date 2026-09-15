@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -198,8 +198,8 @@ async def _clear_development_data(db: AsyncSession, owner: User) -> None:
 @router.get("/version")
 async def system_version():
     return {
-        "release": "V1.1.DEV.15",
-        "migration_head": "025",
+        "release": "V1.1.24.01",
+        "migration_head": "032",
         "phase": 1,
         "navigation": [
             "School Administration",
@@ -218,8 +218,8 @@ async def system_settings(_: Annotated[User, Depends(get_current_active_superuse
     settings = get_settings()
     return {
         "environment": settings.app_env,
-        "platform_version": "V1.1.DEV.15",
-        "migration_head": "025",
+        "platform_version": "V1.1.24.01",
+        "migration_head": "032",
         "debug": settings.debug,
         "password_min_length": 10,
         "password_max_length": 128,
@@ -241,13 +241,24 @@ async def system_settings(_: Annotated[User, Depends(get_current_active_superuse
 
 
 @router.get("/platform-status")
-async def platform_status(_: Annotated[User, Depends(get_current_active_superuser)]):
+async def platform_status(_: Annotated[User, Depends(get_current_active_superuser)], db: Annotated[AsyncSession, Depends(get_db)]):
     settings = get_settings()
     summary = module_status_summary()
+    try:
+        current = (await db.execute(text("SELECT version_num FROM alembic_version"))).scalar_one_or_none() or "unknown"
+        database_status = "connected"
+    except Exception:
+        current = "unavailable"
+        database_status = "unavailable"
+    head = "029"
     return {
         "platform_status": "Development",
-        "release": "V1.1.DEV.15",
-        "migration_head": "025",
+        "release": "V1.1.24.01",
+        "migration_head": head,
+        "migration_current": current,
+        "migration_status": "up_to_date" if current == head else "migration_required",
+        "database_status": database_status,
+        "api_status": "healthy",
         "phase": 1,
         "environment": settings.app_env,
         "summary": summary,

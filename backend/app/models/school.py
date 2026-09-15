@@ -17,7 +17,7 @@ def utcnow() -> datetime:
 
 
 class School(Base):
-    """UDISE-registered school/campus/branch unit inside an organization."""
+    """UDISE-registered School tenant inside a Society/Trust."""
 
     __tablename__ = "schools"
 
@@ -25,8 +25,8 @@ class School(Base):
     code: Mapped[str] = mapped_column(String(50), nullable=False)
     # Legacy primary UDISE mirror retained for backward compatibility; authoritative values live in school_udise_codes.
     udise_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    organization_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL"), index=True
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(
@@ -121,6 +121,7 @@ class SchoolConfiguration(Base):
     address_line1: Mapped[str | None] = mapped_column(String(255))
     address_line2: Mapped[str | None] = mapped_column(String(255))
     city: Mapped[str | None] = mapped_column(String(100))
+    district: Mapped[str | None] = mapped_column(String(100))
     state: Mapped[str | None] = mapped_column(String(100))
     country: Mapped[str | None] = mapped_column(String(100), default="India")
     pincode: Mapped[str | None] = mapped_column(String(20))

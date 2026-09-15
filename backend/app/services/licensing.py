@@ -12,16 +12,9 @@ PHASE1_MODULES = [
     "reports",
 ]
 
-# Phase 1 is the minimum operational ERP baseline selected by the Product
-# Owner. These modules are always enabled and are not separately switchable.
-CORE_MODULES = set(PHASE1_MODULES)
-
-
-def require_core_modules(enabled_modules: list[str]) -> None:
-    missing = sorted(CORE_MODULES - set(enabled_modules))
-    if missing:
-        raise ValueError(f"Mandatory core modules cannot be disabled: {', '.join(missing)}")
-
+# Subscription policy: there are no mandatory/Core ERP business modules.
+# Each plan carries the exact module entitlement approved by the Platform Owner.
+# PHASE1_MODULES remains only a delivery-status/legacy catalog constant.
 
 def next_may_31(now: datetime | None = None) -> datetime:
     """Return 31-May 23:59:59 IST as an aware UTC datetime.

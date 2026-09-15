@@ -21,7 +21,14 @@ from app.core.usernames import normalize_username
 from app.db.session import get_db
 from app.models.session import UserSession, hash_token, utcnow
 from app.models.user import Role, RolePermission, User, UserRole
-from app.schemas.auth import ACCOUNT_TYPES, ChangePasswordRequest, LoginRequest, Token, UserOut
+from app.schemas.auth import (
+    ACCOUNT_TYPES,
+    ChangePasswordRequest,
+    LoginRequest,
+    ProfileUpdateRequest,
+    Token,
+    UserOut,
+)
 from app.services.audit import record_audit
 from app.services.auth_rate_limit import clear_login_rate_limit, enforce_login_rate_limit
 from app.services.module_access import effective_enabled_modules
@@ -66,7 +73,7 @@ async def _issue_tokens(
     extra = {
         "organization_id": str(user.organization_id) if user.organization_id else None,
         "school_id": str(user.school_id) if user.school_id else None,
-        "campus_id": str(user.campus_id) if user.campus_id else None,
+        "campus_id": None,
         "sid": str(session_id),
         "is_superuser": user.is_superuser,
     }
@@ -402,6 +409,55 @@ async def read_me(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    result = await db.execute(
+        select(User)
+        .options(
+            selectinload(User.roles)
+            .selectinload(UserRole.role)
+            .selectinload(Role.permissions)
+            .selectinload(RolePermission.permission)
+        )
+        .where(User.id == current_user.id)
+    )
+    user = result.scalar_one()
+    enabled_modules = await effective_enabled_modules(db, user)
+    return _user_to_out(user, enabled_modules)
+
+
+@router.patch("/me/profile", response_model=UserOut)
+async def update_my_profile(
+    body: ProfileUpdateRequest,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    before = {
+        "full_name": current_user.full_name,
+        "designation": current_user.designation,
+        "email": current_user.email,
+        "phone": current_user.phone,
+    }
+    current_user.full_name = body.full_name.strip()
+    current_user.designation = body.designation.strip() if body.designation else None
+    current_user.email = body.email.strip().lower() if body.email else None
+    current_user.phone = body.phone.strip() if body.phone else None
+    await record_audit(
+        db,
+        action="user.profile.updated",
+        user=current_user,
+        module="auth",
+        entity_type="User",
+        entity_id=current_user.id,
+        before=before,
+        after={
+            "full_name": current_user.full_name,
+            "designation": current_user.designation,
+            "email": current_user.email,
+            "phone": current_user.phone,
+        },
+        request=request,
+    )
+    await db.commit()
     result = await db.execute(
         select(User)
         .options(

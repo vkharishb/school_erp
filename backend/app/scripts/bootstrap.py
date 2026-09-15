@@ -1,4 +1,4 @@
-"""
+﻿"""
 Bootstrap Super Admin + system roles + module catalog.
 Safe to run multiple times (idempotent).
 """
@@ -14,6 +14,7 @@ from app.core.security import get_password_hash
 from app.core.usernames import normalize_username
 from app.db.session import AsyncSessionLocal
 from app.models.license import ModuleDefinition
+from app.models.subscription import SubscriptionPlan
 from app.models.user import Permission, Role, RolePermission, User, UserRole
 
 settings = get_settings()
@@ -46,6 +47,9 @@ PERMISSIONS = [
     ("user.edit", "Edit users", "school_admin"),
     ("role.manage", "Manage roles & permissions", "school_admin"),
     ("license.view", "View license", "school_admin"),
+    ("payments.manage", "Manage platform payments and receipts", "payments"),
+    ("subscriptions.manage", "Manage plans, subscriptions and activation keys", "subscriptions"),
+    ("activation.perform", "Activate organization schools", "subscriptions"),
     ("academic_year.view", "View academic years", "school_admin"),
     ("academic_year.manage", "Manage academic years", "school_admin"),
     ("academic_class.manage", "Manage classes & sections", "school_admin"),
@@ -104,6 +108,27 @@ async def bootstrap() -> None:
                 module.name = name
                 module.is_core = is_core
                 module.sort_order = order
+
+        # 1b. Platform subscription plan catalog (idempotent defaults).
+        # Values are editable only outside production; production plan catalog is API-locked.
+        plan_defaults = [
+            dict(code="TRIAL", name="30-Day Trial", plan_kind="predefined", billing_model="flat", monthly_price=0, yearly_price=0, trial_days=30, student_limit=50, teacher_limit=10, minimum_students=0, seats_included=50, enabled_modules=["dashboard","school_admin","school_config","student","teacher","fee"], allow_overage=False, is_trial_available=True, description="Restricted 30-day trial: 50 students and 10 teachers per school; reports/receipts/exports/bulk upload disabled."),
+            dict(code="BASIC", name="Basic", plan_kind="predefined", billing_model="hybrid", monthly_price=0, yearly_price=8000, student_limit=200, teacher_limit=0, minimum_students=0, seats_included=200, enabled_modules=["dashboard","school_admin","school_config","student","fee","attendance","reports"], allow_overage=True, is_trial_available=False, description="Subscription-based Basic plan: dashboard, limited school administration, student management, fee management, student attendance, applicable bulk upload and limited reports. 200 students per school included; overage is charged per excess student."),
+            dict(code="STANDARD", name="Standard", plan_kind="predefined", billing_model="hybrid", monthly_price=0, yearly_price=12000, student_limit=500, teacher_limit=0, minimum_students=0, seats_included=500, enabled_modules=["dashboard","school_admin","school_config","student","fee","attendance","reports","teacher","communication"], allow_overage=True, is_trial_available=False, description="Basic plan plus Teacher Management, full Attendance, full Reports and Communication. 500 students per school included; overage is charged per excess student."),
+            dict(code="PREMIUM", name="Premium", plan_kind="predefined", billing_model="hybrid", monthly_price=0, yearly_price=18000, student_limit=999, teacher_limit=0, minimum_students=0, seats_included=999, enabled_modules=[m[0] for m in MODULES], allow_overage=True, is_trial_available=False, description="All platform modules. 999 students per school included; overage is charged per excess student."),
+            dict(code="CUSTOMIZED", name="Customized", plan_kind="custom", billing_model="flat", monthly_price=0, yearly_price=0, student_limit=0, teacher_limit=0, minimum_students=0, seats_included=0, enabled_modules=[], allow_overage=True, is_trial_available=False, description="Platform Owner configures plan details, cost and the exact module list before assignment to an Organization."),
+            dict(code="PAYG", name="Pay As You Use", plan_kind="predefined", billing_model="per_student", monthly_price=0, yearly_price=300, student_limit=0, teacher_limit=0, minimum_students=1, seats_included=0, enabled_modules=[m[0] for m in MODULES], allow_overage=False, is_trial_available=False, description="Premium module entitlement priced per student. Platform Owner configures the per-student monthly and/or yearly rate."),
+        ]
+        # Keep the predefined product policy aligned on every bootstrap. Commercial
+        # prices remain Platform Owner controlled; this synchronizes module policy
+        # and student thresholds without silently changing negotiated pricing.
+        for data in plan_defaults:
+            existing = (await db.execute(select(SubscriptionPlan).where(SubscriptionPlan.code == data["code"]))).scalar_one_or_none()
+            if not existing:
+                db.add(SubscriptionPlan(**data))
+                continue
+            for field in ("name", "plan_kind", "billing_model", "student_limit", "teacher_limit", "minimum_students", "seats_included", "enabled_modules", "allow_overage", "is_trial_available", "description"):
+                setattr(existing, field, data[field])
 
         # 2. Permissions
         perm_map: dict[str, uuid.UUID] = {}
@@ -167,7 +192,7 @@ async def bootstrap() -> None:
             "user.view",
             "user.create",
             "user.edit",
-            "license.view",
+            "activation.perform",
             "academic_year.view",
             "academic_year.manage",
             "academic_class.manage",
@@ -313,3 +338,4 @@ async def bootstrap() -> None:
 
 if __name__ == "__main__":
     asyncio.run(bootstrap())
+

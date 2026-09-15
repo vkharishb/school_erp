@@ -7,6 +7,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.security import decode_token
 from app.db.session import get_db
@@ -14,8 +15,8 @@ from app.models.license import SchoolLicense
 from app.models.organization import Campus, Organization
 from app.models.school import School
 from app.models.session import UserSession
+from app.models.subscription import OrganizationSubscription, SchoolSubscription
 from app.models.user import Role, RolePermission, User, UserRole
-from app.services.licensing import CORE_MODULES
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -43,7 +44,6 @@ def has_permission(user: User, code: str) -> bool:
 async def ensure_user_tenant_active(user: User, db: AsyncSession) -> None:
     if user.is_superuser:
         return
-    now = datetime.now(UTC)
     if user.organization_id:
         organization = await db.get(Organization, user.organization_id)
         if not organization:
@@ -52,16 +52,34 @@ async def ensure_user_tenant_active(user: User, db: AsyncSession) -> None:
             raise HTTPException(status_code=403, detail="Organization is archived")
         if not organization.is_active:
             raise HTTPException(status_code=403, detail="Organization is disabled")
-        if organization.license_expires_at and organization.license_expires_at < now:
-            raise HTTPException(status_code=403, detail="Organization license has expired")
-        if organization.license_starts_at and organization.license_starts_at > now:
-            raise HTTPException(status_code=403, detail="Organization license is not active yet")
     if user.school_id:
         school = await db.get(School, user.school_id)
         if not school or school.deleted_at is not None:
             raise HTTPException(status_code=403, detail="School/branch is archived")
         if not school.is_active:
             raise HTTPException(status_code=403, detail="School/branch is disabled")
+        trial_expiry = (
+            await db.execute(
+                select(SchoolSubscription.expires_at)
+                .join(
+                    OrganizationSubscription,
+                    OrganizationSubscription.id
+                    == SchoolSubscription.organization_subscription_id,
+                )
+                .where(
+                    SchoolSubscription.school_id == user.school_id,
+                    OrganizationSubscription.billing_cycle == "trial",
+                    SchoolSubscription.status == "trial",
+                )
+                .order_by(SchoolSubscription.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if trial_expiry and trial_expiry <= datetime.now(UTC):
+            raise HTTPException(
+                status_code=403,
+                detail="The 30-day trial has expired. Contact the Organization Admin to upgrade.",
+            )
         result = await db.execute(
             select(SchoolLicense).where(SchoolLicense.school_id == user.school_id)
         )
@@ -106,6 +124,12 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if user is None or not user.is_active:
         raise credentials_exception
+
+    # Campus assignments are retained in the database only as legacy metadata.
+    # They must never narrow authorization or operational visibility. Present the
+    # authenticated principal as School-scoped without dirtying the ORM object.
+    if user.campus_id is not None:
+        set_committed_value(user, "campus_id", None)
 
     session = await db.get(UserSession, parsed_session_id)
     if session is None or session.user_id != user.id or not session.is_valid:
@@ -191,6 +215,27 @@ async def ensure_school_access(user: User, db: AsyncSession, school_id: UUID) ->
     raise HTTPException(status_code=403, detail="School access denied")
 
 
+async def get_school_compatibility_campus(db: AsyncSession, school_id: UUID) -> Campus:
+    """Return the hidden compatibility row used by legacy campus-keyed tables.
+
+    Campus is no longer an authorization or UI scope. New school-scoped records are
+    attached to MAIN only until the legacy foreign keys are retired in a later
+    physical-schema cleanup. Existing campus rows remain untouched for data safety.
+    """
+    result = await db.execute(
+        select(Campus)
+        .where(Campus.school_id == school_id, Campus.is_active.is_(True))
+        .order_by((Campus.code == "MAIN").desc(), Campus.created_at)
+    )
+    campus = result.scalars().first()
+    if not campus:
+        raise HTTPException(
+            status_code=409,
+            detail="School academic compatibility record is missing. Run the latest database migration.",
+        )
+    return campus
+
+
 async def ensure_campus_access(user: User, db: AsyncSession, campus_id: UUID) -> Campus:
     campus = await db.get(Campus, campus_id)
     if not campus:
@@ -208,6 +253,12 @@ async def ensure_campus_access(user: User, db: AsyncSession, campus_id: UUID) ->
     ):
         return campus
     if user.account_type == "SCHOOL_ADMIN" and user.school_id == school.id:
+        return campus
+    # School-scoped operational users may intentionally have no campus_id.
+    # In that case their data scope is the whole School, so any campus that
+    # belongs to that School is accessible. Users with an explicit campus_id
+    # remain restricted to that campus.
+    if user.school_id == school.id and user.campus_id is None:
         return campus
     if user.campus_id == campus_id:
         return campus
@@ -238,36 +289,57 @@ async def ensure_license_valid(
         raise HTTPException(status_code=403, detail="School/branch is disabled")
     if school.organization_id:
         organization = await db.get(Organization, school.organization_id)
-        now = datetime.now(UTC)
         if not organization:
             raise HTTPException(status_code=403, detail="Organization is unavailable")
         if organization.archived_at is not None:
             raise HTTPException(status_code=403, detail="Organization is archived")
         if not organization.is_active:
             raise HTTPException(status_code=403, detail="Organization is disabled")
-        if organization.license_starts_at and organization.license_starts_at > now:
-            raise HTTPException(status_code=403, detail="Organization license is not active yet")
-        if organization.license_expires_at and organization.license_expires_at < now:
-            raise HTTPException(status_code=403, detail="Organization license has expired")
-        if (
-            required_module
-            and required_module not in CORE_MODULES
-            and required_module not in (organization.enabled_modules or [])
-        ):
+    entitlement = (
+        await db.execute(
+            select(SchoolSubscription)
+            .where(SchoolSubscription.school_id == school_id)
+            .order_by(SchoolSubscription.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if entitlement:
+        account = await db.get(
+            OrganizationSubscription, entitlement.organization_subscription_id
+        )
+        if account and account.billing_cycle != "trial" and entitlement.status != "active":
             raise HTTPException(
                 status_code=403,
-                detail=f"Module '{required_module}' is disabled for this organization",
+                detail="School ERP activation is pending. Complete activation before using subscription modules.",
             )
     result = await db.execute(select(SchoolLicense).where(SchoolLicense.school_id == school_id))
     license_ = result.scalar_one_or_none()
     if not license_ or not license_.is_valid():
         raise HTTPException(status_code=403, detail="School license is invalid or expired")
-    if (
-        required_module
-        and required_module not in CORE_MODULES
-        and not license_.has_module(required_module)
-    ):
+    if required_module and not license_.has_module(required_module):
         raise HTTPException(
             status_code=403, detail=f"Module '{required_module}' is disabled for this school"
         )
     return license_
+
+
+async def ensure_download_allowed(school_id: UUID, db: AsyncSession) -> None:
+    """Trial schools may use restricted ERP screens but cannot download/export data."""
+    result = await db.execute(
+        select(OrganizationSubscription.billing_cycle)
+        .join(
+            SchoolSubscription,
+            SchoolSubscription.organization_subscription_id == OrganizationSubscription.id,
+        )
+        .where(
+            SchoolSubscription.school_id == school_id,
+            SchoolSubscription.status == "trial",
+        )
+        .order_by(SchoolSubscription.created_at.desc())
+        .limit(1)
+    )
+    if result.scalar_one_or_none() == "trial":
+        raise HTTPException(
+            status_code=403,
+            detail="Downloads and exports are unavailable during the 30-day trial",
+        )

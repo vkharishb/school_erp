@@ -4,6 +4,7 @@ export type BrandingConfig = {
   tagline: string;
   welcomeMessage: string;
   releaseVersion: string;
+  logoUrl: string;
 };
 
 const env = import.meta.env;
@@ -18,5 +19,6 @@ export const branding: BrandingConfig = {
     env.VITE_LOGIN_WELCOME?.trim() ||
     "One secure workspace for students, teachers, fees, attendance and academics.",
   releaseVersion:
-    env.VITE_RELEASE_VERSION?.trim() || "V1.1.DEV.15",
+    env.VITE_RELEASE_VERSION?.trim() || "V1.1.DEV.22",
+  logoUrl: env.VITE_ERP_LOGO_URL?.trim() || "/favicon.svg",
 };

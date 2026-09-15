@@ -70,9 +70,11 @@ async def list_campuses(
         "ORGANIZATION_ADMIN",
         "SCHOOL_ADMIN",
     }:
-        if not current_user.campus_id:
-            raise HTTPException(status_code=403, detail="Campus scope is not assigned")
-        query = query.where(Campus.id == current_user.campus_id)
+        # campus_id is optional for School-wide operational users. An explicit
+        # campus_id narrows visibility; no campus_id means School scope, which
+        # was already validated by ensure_school_access above.
+        if current_user.campus_id:
+            query = query.where(Campus.id == current_user.campus_id)
     result = await db.execute(query.order_by(Campus.name))
     return list(result.scalars().all())
 

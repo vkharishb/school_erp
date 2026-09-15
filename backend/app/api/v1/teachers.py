@@ -2,11 +2,12 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import (
     ensure_campus_access,
+    get_school_compatibility_campus,
     ensure_license_valid,
     ensure_school_access,
     get_role_codes,
@@ -17,6 +18,7 @@ from app.models.staff import Teacher
 from app.models.user import User
 from app.schemas.teacher import TeacherCreate, TeacherOut, TeacherUpdate
 from app.services.audit import record_audit
+from app.services.subscriptions import plan_for_school, require_trial_capability
 
 router = APIRouter(prefix="/teachers", tags=["Teachers Management"])
 
@@ -68,9 +70,12 @@ async def create_teacher(
 ):
     await ensure_school_access(user, db, school_id)
     await ensure_license_valid(school_id, db, "teacher")
-    campus = await ensure_campus_access(user, db, payload.campus_id)
-    if campus.school_id != school_id:
-        raise HTTPException(status_code=422, detail="Campus does not belong to this school")
+    plan = await plan_for_school(db, school_id)
+    if plan and plan.code.upper() == "TRIAL":
+        count = int((await db.execute(select(func.count(Teacher.id)).where(Teacher.school_id == school_id, Teacher.is_active.is_(True)))).scalar_one() or 0)
+        if count >= 10:
+            raise HTTPException(status_code=409, detail="30-Day Trial permits a maximum of 10 active teachers")
+    campus = await get_school_compatibility_campus(db, school_id)
     exists = await db.execute(
         select(Teacher).where(
             Teacher.school_id == school_id, Teacher.employee_code == payload.employee_code
@@ -78,7 +83,7 @@ async def create_teacher(
     )
     if exists.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Employee code already exists")
-    teacher = Teacher(school_id=school_id, **payload.model_dump())
+    teacher = Teacher(school_id=school_id, campus_id=campus.id, **payload.model_dump(exclude={"campus_id"}))
     db.add(teacher)
     await db.flush()
     await record_audit(
@@ -107,6 +112,10 @@ async def update_teacher(
         raise HTTPException(status_code=404, detail="Teacher not found")
     await ensure_school_access(user, db, teacher.school_id)
     await ensure_license_valid(teacher.school_id, db, "teacher")
+    try:
+        await require_trial_capability(db, teacher.school_id, "teacher.edit")
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     await ensure_campus_access(user, db, teacher.campus_id)
     before = {
         "first_name": teacher.first_name,

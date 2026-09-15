@@ -14,6 +14,7 @@ from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import (
+    ensure_download_allowed,
     ensure_campus_access,
     ensure_license_valid,
     ensure_school_access,
@@ -147,6 +148,12 @@ async def _authorize(
     await ensure_school_access(user, db, school_id)
     await ensure_license_valid(school_id, db, "reports")
     await ensure_license_valid(school_id, db, definition["module"])
+    # Reports are subscription-aware. BASIC can report only on its entitled
+    # operational modules; teacher reports require Teacher Management, etc.
+    if report_key in {"teacher_roster", "teacher_attendance"}:
+        await ensure_license_valid(school_id, db, "teacher")
+    if report_key == "marks_performance":
+        await ensure_license_valid(school_id, db, "marks")
     _require_permission(user, definition["permission"])
     if export:
         _require_permission(user, "reports.export")
@@ -1078,6 +1085,7 @@ async def export_report(
     payment_mode: str | None = None,
 ):
     campus_id = await _authorize(db, user, school_id, report_key, campus_id, export=True)
+    await ensure_download_allowed(school_id, db)
     report = await _build_report(
         db,
         school_id,

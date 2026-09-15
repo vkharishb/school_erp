@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import (
     ensure_campus_access,
+    get_school_compatibility_campus,
     ensure_license_valid,
     ensure_school_access,
     get_current_user,
@@ -47,6 +48,7 @@ from app.schemas.student import (
     SubjectUpdate,
 )
 from app.services.audit import record_audit
+from app.services.subscriptions import plan_for_school, require_trial_capability
 
 router = APIRouter(prefix="/students", tags=["Students & Academics"])
 
@@ -101,6 +103,31 @@ def _standard_class_sort_order(code: str, name: str) -> int | None:
     if match:
         return 30 + int(match.group(1)) * 10
     return None
+
+
+@router.post("/schools/{school_id}/classes", response_model=AcademicClassOut, status_code=201)
+async def create_school_class(
+    school_id: UUID, payload: AcademicClassCreate, request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_permissions("academic_class.manage"))],
+):
+    await ensure_school_access(user, db, school_id)
+    campus = await get_school_compatibility_campus(db, school_id)
+    return await create_class(campus.id, payload, request, db, user)
+
+
+@router.get("/schools/{school_id}/classes", response_model=list[AcademicClassOut])
+async def list_school_classes(
+    school_id: UUID, db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    await ensure_school_access(user, db, school_id)
+    result = await db.execute(
+        select(AcademicClass).join(Campus, Campus.id == AcademicClass.campus_id)
+        .where(Campus.school_id == school_id, AcademicClass.is_active.is_(True))
+        .order_by(AcademicClass.sort_order, AcademicClass.name)
+    )
+    return list(result.scalars().all())
 
 
 @router.post("/campuses/{campus_id}/classes", response_model=AcademicClassOut, status_code=201)
@@ -308,6 +335,31 @@ async def list_sections(
     return list(result.scalars().all())
 
 
+@router.post("/schools/{school_id}/subjects", response_model=SubjectOut, status_code=201)
+async def create_school_subject(
+    school_id: UUID, payload: SubjectCreate, request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_permissions("subject.manage"))],
+):
+    await ensure_school_access(user, db, school_id)
+    campus = await get_school_compatibility_campus(db, school_id)
+    return await create_subject(campus.id, payload, request, db, user)
+
+
+@router.get("/schools/{school_id}/subjects", response_model=list[SubjectOut])
+async def list_school_subjects(
+    school_id: UUID, db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    await ensure_school_access(user, db, school_id)
+    result = await db.execute(
+        select(Subject).join(Campus, Campus.id == Subject.campus_id)
+        .where(Campus.school_id == school_id, Subject.is_active.is_(True))
+        .order_by(Subject.name)
+    )
+    return list(result.scalars().all())
+
+
 @router.post("/campuses/{campus_id}/subjects", response_model=SubjectOut, status_code=201)
 async def create_subject(
     campus_id: UUID,
@@ -432,21 +484,15 @@ async def create_student(
 ):
     await ensure_school_access(user, db, school_id)
     await ensure_license_valid(school_id, db, "student")
-    campus_id = payload.campus_id or user.campus_id
-    if campus_id:
-        campus = await ensure_campus_access(user, db, campus_id)
-        if campus.school_id != school_id:
-            raise HTTPException(status_code=422, detail="Campus does not belong to this school")
-    else:
-        result = await db.execute(
-            select(Campus)
-            .where(Campus.school_id == school_id, Campus.is_active.is_(True))
-            .order_by(Campus.created_at)
-        )
-        campus = result.scalars().first()
-        if not campus:
-            raise HTTPException(status_code=422, detail="School has no active campus")
-        campus_id = campus.id
+    plan = await plan_for_school(db, school_id)
+    if plan and plan.code.upper() == "TRIAL":
+        count = int((await db.execute(select(func.count(Student.id)).where(Student.school_id == school_id, Student.status == "active"))).scalar_one() or 0)
+        if count >= 50:
+            raise HTTPException(status_code=409, detail="30-Day Trial permits a maximum of 50 active students")
+    # Campus is no longer an operational input/scope. Keep the legacy FK populated
+    # with the hidden MAIN compatibility row until physical FK retirement.
+    campus = await get_school_compatibility_campus(db, school_id)
+    campus_id = campus.id
     exists = await db.execute(
         select(Student).where(
             Student.school_id == school_id,
@@ -713,6 +759,10 @@ async def update_student(
 ):
     await ensure_school_access(user, db, school_id)
     await ensure_license_valid(school_id, db, "student")
+    try:
+        await require_trial_capability(db, school_id, "student.edit")
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     student = await db.get(Student, student_id)
     if not student or student.school_id != school_id:
         raise HTTPException(status_code=404, detail="Student not found")

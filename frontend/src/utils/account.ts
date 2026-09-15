@@ -3,7 +3,7 @@ import type { AccountType, User } from "../types";
 const ACCOUNT_LABELS: Record<AccountType, string> = {
   SUPER_ADMIN: "Platform Owner",
   ORGANIZATION_ADMIN: "Organization Admin",
-  SCHOOL_ADMIN: "School / Branch Admin",
+  SCHOOL_ADMIN: "School Admin",
   ACCOUNTS: "Accountant",
   TEACHER: "Teacher",
   RECEPTIONIST: "Receptionist",

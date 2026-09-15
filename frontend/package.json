@@ -1,7 +1,7 @@
 {
   "name": "school-erp-frontend",
   "private": true,
-  "version": "1.1.0-dev.15",
+  "version": "1.1.24-01",
   "type": "module",
   "scripts": {
     "dev": "vite",

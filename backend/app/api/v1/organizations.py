@@ -1,4 +1,6 @@
 from datetime import UTC, datetime, time, timedelta, timezone
+import secrets
+import string
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
@@ -32,6 +34,7 @@ from app.models.organization import (
 )
 from app.models.school import School, SchoolConfiguration
 from app.models.staff import Teacher
+from app.models.subscription import OrganizationSubscription, SubscriptionPlan
 from app.models.user import Role, User, UserRole
 from app.schemas.foundation import (
     AcademicYearCreate,
@@ -51,14 +54,24 @@ from app.services.backups import has_recent_successful_backup
 from app.services.corrections import consume_annual_correction
 from app.services.licensing import (
     IMPLEMENTED_MODULES,
-    PHASE1_MODULES,
     next_may_31,
-    require_core_modules,
 )
 from app.services.password_policy import validate_password
 from app.services.session_control import revoke_organization_sessions
+from app.services.subscriptions import create_organization_subscription, effective_modules
+from app.services.transactional_email import send_transactional_email
 
 router = APIRouter(prefix="/organizations", tags=["Organizations"])
+
+def _temporary_password(length: int = 14) -> str:
+    alphabet = string.ascii_letters + string.digits + "!@#$%&*"
+    while True:
+        value = "".join(secrets.choice(alphabet) for _ in range(length))
+        if any(c.islower() for c in value) and any(c.isupper() for c in value) and any(c.isdigit() for c in value) and any(c in "!@#$%&*" for c in value):
+            return value
+
+async def _latest_subscription(db: AsyncSession, organization_id: UUID) -> OrganizationSubscription | None:
+    return (await db.execute(select(OrganizationSubscription).where(OrganizationSubscription.organization_id == organization_id).order_by(OrganizationSubscription.created_at.desc()).limit(1))).scalar_one_or_none()
 
 
 async def _next_organization_code(db: AsyncSession, name: str) -> str:
@@ -140,19 +153,33 @@ async def create_organization(
         raise HTTPException(
             status_code=409, detail="Organization Admin username or email already exists"
         )
-    validate_password(payload.admin_password, username=admin_username)
+    temporary_password = _temporary_password()
+    validate_password(temporary_password, username=admin_username)
     code = await _next_organization_code(db, payload.name)
     now = datetime.now(UTC)
+    selected_plan = None
+    if not payload.subscription_plan_id or not payload.billing_cycle:
+        raise HTTPException(status_code=422, detail="Plan or 30-Day Trial is mandatory for every Organization")
+    if payload.subscription_plan_id:
+        selected_plan = await db.get(SubscriptionPlan, payload.subscription_plan_id)
+        if not selected_plan or not selected_plan.is_active:
+            raise HTTPException(status_code=404, detail="Active subscription plan not found")
+        plan_code = selected_plan.code.upper()
+        if plan_code in {"BASIC", "STANDARD", "PREMIUM"} and payload.billing_cycle != "yearly":
+            raise HTTPException(status_code=422, detail=f"{selected_plan.name} is yearly only")
+        if plan_code in {"CUSTOMIZED", "PAYG"} and payload.billing_cycle not in {"monthly", "yearly"}:
+            raise HTTPException(status_code=422, detail="Customized supports monthly or yearly billing")
+    effective_school_limit = 1 if selected_plan and selected_plan.code.upper() == "TRIAL" else payload.allowed_schools
     organization = Organization(
         code=code,
         name=payload.name.strip(),
-        allowed_schools=payload.allowed_schools,
+        allowed_schools=effective_school_limit,
         head_full_name=payload.head_full_name.strip(),
         head_email=str(payload.head_email),
         head_phone=payload.head_phone,
-        enabled_modules=list(PHASE1_MODULES),
-        license_starts_at=now,
-        license_expires_at=next_may_31(now),
+        enabled_modules=effective_modules(selected_plan, trial=selected_plan.code.upper() == "TRIAL") if selected_plan else [],
+        license_starts_at=None if selected_plan else now,
+        license_expires_at=None if selected_plan else next_may_31(now),
     )
     db.add(organization)
     await db.flush()
@@ -169,7 +196,7 @@ async def create_organization(
         username=admin_username,
         account_type="ORGANIZATION_ADMIN",
         email=admin_email,
-        hashed_password=get_password_hash(payload.admin_password),
+        hashed_password=get_password_hash(temporary_password),
         full_name=payload.head_full_name.strip(),
         designation=payload.admin_designation,
         phone=payload.head_phone,
@@ -184,11 +211,34 @@ async def create_organization(
     await db.flush()
     db.add(UserRole(user_id=admin.id, role_id=role.id))
     await db.flush()
+    subscription = None
+    if selected_plan and payload.billing_cycle:
+        try:
+            subscription = await create_organization_subscription(
+                db,
+                organization_id=organization.id,
+                plan=selected_plan,
+                billing_cycle=payload.billing_cycle,
+                school_count=effective_school_limit,
+                discount_type=payload.discount_type,
+                discount_value=payload.discount_value,
+                discount_reason=payload.discount_reason,
+                tax_mode=payload.tax_mode,
+                tax_rate=payload.tax_rate,
+                activation_minimum_amount=payload.activation_minimum_amount,
+                activation_override_reason=payload.activation_override_reason,
+                activation_overridden_by=actor.id,
+                due_at=payload.payment_due_at,
+                notes=payload.subscription_notes,
+                created_by=actor.id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     await record_audit(
         db,
         action="organization.created",
         user=actor,
-        module="school_admin",
+        module="society_trust",
         entity_type="Organization",
         entity_id=organization.id,
         after={
@@ -198,12 +248,57 @@ async def create_organization(
             "organization_admin_username": admin.username,
             "organization_admin_email": admin.email,
             "organization_admin_designation": admin.designation,
+            "subscription_id": str(subscription.id) if subscription else None,
+            "subscription_plan": selected_plan.name if selected_plan else None,
+            "billing_cycle": subscription.billing_cycle if subscription else None,
         },
         request=request,
         target_organization_id=organization.id,
     )
-    return _organization_out(organization, admin)
+    email_ok, email_error = send_transactional_email(
+        to_email=admin.email or organization.head_email or "",
+        subject="School ERP account created",
+        body=f"Your Society/Trust ERP account is ready. Login email: {admin.email}. Username: {admin.username}. Login: {get_settings().frontend_login_url}. Contact the Platform Owner for the temporary password.",
+    )
+    result = _organization_out(organization, admin)
+    return result.model_copy(update={"temporary_password": temporary_password, "email_delivery_status": "sent" if email_ok else f"failed: {email_error}"})
 
+
+
+@router.post("/{organization_id}/admin/reset-temporary-password")
+async def reset_organization_admin_temporary_password(
+    organization_id: UUID, request: Request, db: Annotated[AsyncSession, Depends(get_db)],
+    actor: Annotated[User, Depends(get_current_active_superuser)],
+):
+    admins = await _organization_admin_map(db, [organization_id])
+    admin = admins.get(organization_id)
+    if not admin:
+        raise HTTPException(status_code=404, detail="Organization Admin not found")
+    temporary_password = _temporary_password()
+    validate_password(temporary_password, username=admin.username)
+    admin.hashed_password = get_password_hash(temporary_password)
+    admin.must_change_password = True
+    revoked = await revoke_organization_sessions(db, organization_id)
+    await record_audit(db, action="organization_admin.temporary_password.reset", user=actor, module="society_trust", entity_type="User", entity_id=admin.id, after={"must_change_password": True}, metadata={"sessions_revoked": revoked}, request=request, target_organization_id=organization_id)
+    await db.flush()
+    return {"temporary_password": temporary_password, "username": admin.username, "email": admin.email}
+
+
+@router.post("/{organization_id}/admin/resend-email")
+async def resend_organization_admin_email(
+    organization_id: UUID, request: Request, db: Annotated[AsyncSession, Depends(get_db)],
+    actor: Annotated[User, Depends(get_current_active_superuser)],
+):
+    organization = await db.get(Organization, organization_id)
+    admins = await _organization_admin_map(db, [organization_id])
+    admin = admins.get(organization_id)
+    if not organization or not admin or not admin.email:
+        raise HTTPException(status_code=404, detail="Society/Trust or Organization Admin email not found")
+    ok, error = send_transactional_email(to_email=admin.email, subject="School ERP account information", body=f"Your Society/Trust ERP login email is {admin.email}; username is {admin.username}. Login: {get_settings().frontend_login_url}. Contact the Platform Owner if a new temporary password is required.")
+    await record_audit(db, action="organization_admin.email.resent", user=actor, module="society_trust", entity_type="User", entity_id=admin.id, after={"delivery_status": "sent" if ok else "failed"}, metadata={"error": error} if error else None, request=request, target_organization_id=organization_id)
+    if not ok:
+        raise HTTPException(status_code=503, detail=f"Email delivery failed: {error}")
+    return {"status": "sent"}
 
 @router.get("", response_model=list[OrganizationOut])
 async def list_organizations(
@@ -268,12 +363,113 @@ async def update_organization(
             status_code=409, detail="Archived Organization is read-only. Restore it before editing."
         )
     changes = payload.model_dump(exclude_unset=True)
+    capacity_effective_at = changes.pop("capacity_effective_at", None)
+    capacity_reason = changes.pop("capacity_reason", None)
+    capacity_discount_type = changes.pop("capacity_discount_type", "none")
+    capacity_discount_value = Decimal(str(changes.pop("capacity_discount_value", 0) or 0))
+    capacity_discount_reason = changes.pop("capacity_discount_reason", None)
     if not changes:
         return await _organization_out_for_db(db, organization)
     if not user.is_superuser and "allowed_schools" in changes:
         raise HTTPException(
             status_code=403, detail="Only Super Admin can change the allowed number of Schools"
         )
+    if "allowed_schools" in changes:
+        # Capacity is a commercial limit, not an activation count. Trial is always
+        # fixed at one School. A paid limit may be increased only after every
+        # currently approved School slot is already consumed.
+        from app.models.subscription import OrganizationSubscription
+
+        current_subscription = (
+            await db.execute(
+                select(OrganizationSubscription).where(
+                    OrganizationSubscription.organization_id == organization.id,
+                    OrganizationSubscription.status.in_(["trial", "pending_payment", "active", "overdue"]),
+                )
+            )
+        ).scalar_one_or_none()
+        requested_limit = int(changes["allowed_schools"])
+        school_count = int((await db.execute(
+            select(func.count(School.id)).where(
+                School.organization_id == organization.id,
+                School.deleted_at.is_(None),
+            )
+        )).scalar_one() or 0)
+        if current_subscription and current_subscription.billing_cycle == "trial":
+            if requested_limit != 1:
+                raise HTTPException(status_code=409, detail="Trial School limit is fixed at 1. Convert the Trial to a paid plan before increasing capacity.")
+            requested_limit = 1
+            changes["allowed_schools"] = 1
+            current_subscription.school_count = 1
+        else:
+            current_limit = current_subscription.school_count if current_subscription else organization.allowed_schools
+            if requested_limit > current_limit and school_count < current_limit:
+                raise HTTPException(status_code=409, detail=f"Increase Limit is available only after the current School capacity is exhausted ({school_count}/{current_limit}).")
+            if requested_limit < school_count:
+                raise HTTPException(status_code=409, detail=f"School limit cannot be lower than the {school_count} existing Schools.")
+            if requested_limit > current_limit:
+                if not current_subscription:
+                    raise HTTPException(status_code=409, detail="A paid subscription is required before School capacity can be increased")
+                if current_subscription.billing_cycle == "trial":
+                    raise HTTPException(status_code=409, detail="Trial School limit is fixed at 1. Convert the Trial to a paid plan first.")
+                if not capacity_effective_at:
+                    raise HTTPException(status_code=422, detail="Capacity Effective Date is required")
+                if not (capacity_reason or "").strip():
+                    raise HTTPException(status_code=422, detail="Capacity increase reason is required")
+                effective_at = capacity_effective_at
+                if effective_at.tzinfo is None:
+                    effective_at = effective_at.replace(tzinfo=UTC)
+                if effective_at < current_subscription.starts_at or effective_at > current_subscription.expires_at:
+                    raise HTTPException(status_code=422, detail="Capacity Effective Date must fall within the current subscription term")
+                added = requested_limit - current_limit
+                term_seconds = max((current_subscription.expires_at - current_subscription.starts_at).total_seconds(), 1)
+                remaining_seconds = max((current_subscription.expires_at - effective_at).total_seconds(), 0)
+                proration = Decimal(str(remaining_seconds / term_seconds))
+                unit_amount = (current_subscription.list_amount / Decimal(max(current_limit, 1)))
+                incremental_list = (unit_amount * Decimal(added) * proration).quantize(Decimal("0.01"))
+                if capacity_discount_type == "percent":
+                    incremental_discount = (incremental_list * capacity_discount_value / Decimal("100")).quantize(Decimal("0.01"))
+                elif capacity_discount_type == "fixed":
+                    incremental_discount = capacity_discount_value.quantize(Decimal("0.01"))
+                else:
+                    incremental_discount = Decimal("0.00")
+                if incremental_discount > incremental_list:
+                    raise HTTPException(status_code=422, detail="Capacity discount cannot exceed the incremental charge")
+                incremental_taxable = incremental_list - incremental_discount
+                incremental_tax = (incremental_taxable * current_subscription.tax_rate / Decimal("100")).quantize(Decimal("0.01")) if current_subscription.tax_mode == "gst" else Decimal("0.00")
+                incremental_finalized = incremental_taxable + incremental_tax
+                current_subscription.list_amount += incremental_list
+                current_subscription.discount_amount += incremental_discount
+                current_subscription.tax_amount += incremental_tax
+                current_subscription.finalized_amount += incremental_finalized
+                current_subscription.balance_amount += incremental_finalized
+                current_subscription.school_count = requested_limit
+                await record_audit(
+                    db,
+                    action="subscription.capacity.increased",
+                    user=user,
+                    module="subscriptions",
+                    entity_type="OrganizationSubscription",
+                    entity_id=current_subscription.id,
+                    before={"school_count": current_limit},
+                    after={
+                        "school_count": requested_limit,
+                        "added_schools": added,
+                        "effective_at": effective_at.isoformat(),
+                        "incremental_list_amount": str(incremental_list),
+                        "incremental_discount": str(incremental_discount),
+                        "incremental_tax": str(incremental_tax),
+                        "incremental_finalized_amount": str(incremental_finalized),
+                        "reason": capacity_reason.strip(),
+                        "discount_type": capacity_discount_type,
+                        "discount_value": str(capacity_discount_value),
+                        "discount_reason": (capacity_discount_reason or "").strip() or None,
+                    },
+                    request=request,
+                    target_organization_id=organization.id,
+                )
+            elif current_subscription:
+                current_subscription.school_count = requested_limit
     if not user.is_superuser:
         await consume_annual_correction(
             db,
@@ -291,7 +487,7 @@ async def update_organization(
         db,
         action="organization.updated",
         user=user,
-        module="school_admin",
+        module="society_trust",
         entity_type="Organization",
         entity_id=organization.id,
         before=before,
@@ -314,28 +510,50 @@ async def set_organization_status(
     if not organization:
         raise HTTPException(status_code=404, detail="Organization not found")
     if organization.archived_at is not None:
+        raise HTTPException(status_code=409, detail="Archived Society/Trust cannot be enabled or disabled. Restore it first.")
+    subscription = await _latest_subscription(db, organization.id)
+    now = datetime.now(UTC)
+    if (
+        subscription
+        and subscription.expires_at > now
+        and not payload.is_active
+        and not payload.emergency_override
+    ):
         raise HTTPException(
             status_code=409,
-            detail="Archived Organization cannot be enabled or disabled. Restore it first.",
+            detail="Active subscriptions can be suspended only with the Platform Owner emergency override and a mandatory reason",
         )
+    if not payload.reason.strip():
+        raise HTTPException(status_code=422, detail="Reason is required")
     before = {"is_active": organization.is_active}
     organization.is_active = payload.is_active
     revoked_sessions = 0
     if not payload.is_active:
+        organization.disabled_at = now
+        organization.disabled_by = user.id
+        organization.disable_reason = payload.reason.strip()
         # Organization disable is a reversible access suspension. Child School
         # status/data is deliberately left unchanged so re-enable restores the
         # exact prior operational state rather than guessing which Schools were active.
         revoked_sessions = await revoke_organization_sessions(db, organization.id)
+    if payload.is_active:
+        organization.disabled_at = None
+        organization.disabled_by = None
+        organization.disable_reason = None
     await record_audit(
         db,
         action="organization.enabled" if payload.is_active else "organization.disabled",
         user=user,
-        module="school_admin",
+        module="society_trust",
         entity_type="Organization",
         entity_id=organization.id,
         before=before,
         after={"is_active": organization.is_active},
-        metadata={"sessions_revoked": revoked_sessions},
+        metadata={
+            "sessions_revoked": revoked_sessions,
+            "reason": payload.reason.strip(),
+            "emergency_override": bool(payload.emergency_override and not payload.is_active),
+        },
         request=request,
         target_organization_id=organization.id,
     )
@@ -355,8 +573,10 @@ async def archive_organization(
         raise HTTPException(status_code=404, detail="Organization not found")
     if organization.archived_at is not None:
         raise HTTPException(status_code=409, detail="Organization is already archived")
-    if organization.is_active:
-        raise HTTPException(status_code=409, detail="Disable the Organization before archiving it")
+    subscription = await _latest_subscription(db, organization.id)
+    now = datetime.now(UTC)
+    if not subscription or now < subscription.expires_at + timedelta(days=90):
+        raise HTTPException(status_code=409, detail="Archive is available only 3 months after subscription expiry")
     archive_settings = get_settings()
     if archive_settings.require_recent_backup_for_archive and not has_recent_successful_backup(
         archive_settings.archive_backup_max_age_hours
@@ -365,7 +585,6 @@ async def archive_organization(
             status_code=409,
             detail=f"A successful database backup from the last {archive_settings.archive_backup_max_age_hours} hours is required before archiving an Organization.",
         )
-    now = datetime.now(UTC)
     before = {"is_active": organization.is_active, "archived_at": None}
     organization.archived_at = now
     organization.archived_by = user.id
@@ -377,7 +596,7 @@ async def archive_organization(
         db,
         action="organization.archived",
         user=user,
-        module="school_admin",
+        module="society_trust",
         entity_type="Organization",
         entity_id=organization.id,
         before=before,
@@ -415,7 +634,7 @@ async def restore_organization(
         db,
         action="organization.restored",
         user=user,
-        module="school_admin",
+        module="society_trust",
         entity_type="Organization",
         entity_id=organization.id,
         before=before,
@@ -466,10 +685,6 @@ async def update_organization_license(
             raise HTTPException(
                 status_code=409, detail=f"Modules not implemented yet: {', '.join(unavailable)}"
             )
-        try:
-            require_core_modules(list(valid))
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
         organization.enabled_modules = sorted(valid)
     if payload.license_expires_at is not None:
         if payload.license_expires_at <= datetime.now(UTC):
@@ -479,7 +694,7 @@ async def update_organization_license(
         db,
         action="organization.license_updated",
         user=user,
-        module="school_admin",
+        module="society_trust",
         entity_type="Organization",
         entity_id=organization.id,
         before=before,
@@ -826,7 +1041,7 @@ async def create_organization_academic_year(
         db,
         action="academic_year.created",
         user=user,
-        module="school_admin",
+        module="society_trust",
         entity_type="OrganizationAcademicYear",
         entity_id=organization_year.id,
         after={
@@ -923,7 +1138,7 @@ async def update_organization_academic_year(
         db,
         action="academic_year.updated",
         user=user,
-        module="school_admin",
+        module="society_trust",
         entity_type="OrganizationAcademicYear",
         entity_id=year.id,
         before=before,
@@ -1012,7 +1227,7 @@ async def activate_organization_academic_year(
         db,
         action="academic_year.activated",
         user=user,
-        module="school_admin",
+        module="society_trust",
         entity_type="OrganizationAcademicYear",
         entity_id=year.id,
         after={"organization_id": str(year.organization_id), "code": year.code},

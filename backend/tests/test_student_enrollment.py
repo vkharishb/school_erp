@@ -1,12 +1,13 @@
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.factories import create_org, create_school, main_campus_id, suffix
+from tests.factories import activate_school_for_qa, create_org, create_school, main_campus_id, suffix
 
 
 @pytest.mark.asyncio
 async def test_student_identity_and_organization_academic_year_enrollment_policy(
-    client: AsyncClient, admin_headers: dict[str, str]
+    client: AsyncClient, admin_headers: dict[str, str], db_session: AsyncSession
 ):
     token = suffix()
     org = await create_org(
@@ -20,6 +21,7 @@ async def test_student_identity_and_organization_academic_year_enrollment_policy
         area="Razole",
     )
     school_id = school["id"]
+    await activate_school_for_qa(db_session, school_id)
     campus_id = await main_campus_id(client, admin_headers, school_id)
 
     year_26 = await client.post(

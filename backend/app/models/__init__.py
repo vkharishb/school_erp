@@ -31,9 +31,19 @@ from app.models.governance import AnnualCorrectionUsage, SchoolCodeRegistry
 from app.models.license import ModuleDefinition, SchoolLicense
 from app.models.marks import StudentMark
 from app.models.organization import AcademicYear, Campus, Organization, OrganizationAcademicYear
+from app.models.planner import PlatformPlannerItem
 from app.models.school import School, SchoolConfiguration, SchoolUDISECode
 from app.models.session import UserSession
 from app.models.staff import Teacher
+from app.models.subscription import (
+    OrganizationSubscription,
+    SchoolSubscription,
+    SubscriptionActivationKey,
+    SubscriptionBillingSettings,
+    SubscriptionPayment,
+    SubscriptionPaymentReminder,
+    SubscriptionPlan,
+)
 from app.models.user import Permission, Role, RolePermission, User, UserRole
 
 __all__ = [
@@ -50,6 +60,8 @@ __all__ = [
     "ModuleDefinition",
     "Organization",
     "OrganizationAcademicYear",
+    "OrganizationSubscription",
+    "PlatformPlannerItem",
     "ParentStudentLink",
     "Payment",
     "PaymentAllocation",
@@ -62,6 +74,7 @@ __all__ = [
     "SchoolConfiguration",
     "SchoolLicense",
     "SchoolUDISECode",
+    "SchoolSubscription",
     "Section",
     "Student",
     "StudentAttendance",
@@ -71,6 +84,11 @@ __all__ = [
     "StudentGuardian",
     "StudentMark",
     "Subject",
+    "SubscriptionActivationKey",
+    "SubscriptionBillingSettings",
+    "SubscriptionPayment",
+    "SubscriptionPaymentReminder",
+    "SubscriptionPlan",
     "Teacher",
     "TeacherAttendance",
     "User",

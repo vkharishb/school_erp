@@ -4,7 +4,7 @@ import { academicApi, erpAccessApi, foundationApi, studentApi } from "../service
 import { useAuthStore } from "../store/authStore";
 import { hasPermission } from "../utils/permissions";
 import { apiErrorMessage } from "../utils/apiError";
-import type { AcademicClass, AcademicYear, Campus, Section, Student } from "../types";
+import type { AcademicClass, AcademicYear, Section, Student } from "../types";
 
 const GENDERS = ["Male","Female","Transgender","Other","Prefer not to say"];
 const CASTE_CATEGORIES = ["OC","SC","ST","BC-A","BC-B","BC-C","BC-D","BC-E","BC-F"];
@@ -41,7 +41,7 @@ export default function StudentsPage(){
   const [searchParams]=useSearchParams();
   const user=useAuthStore(s=>s.user);
   const canCreate=hasPermission(user,"student.create"),canEdit=hasPermission(user,"student.edit"),canOptERP=hasPermission(user,"erp_access.opt");
-  const [students,setStudents]=useState<Student[]>([]),[campuses,setCampuses]=useState<Campus[]>([]),[years,setYears]=useState<AcademicYear[]>([]),[classes,setClasses]=useState<AcademicClass[]>([]),[sections,setSections]=useState<Section[]>([]);
+  const [students,setStudents]=useState<Student[]>([]),[years,setYears]=useState<AcademicYear[]>([]),[classes,setClasses]=useState<AcademicClass[]>([]),[sections,setSections]=useState<Section[]>([]);
   const [show,setShow]=useState(false),[search,setSearch]=useState(""),[error,setError]=useState(""),[message,setMessage]=useState(""),[editing,setEditing]=useState<Student|null>(null);
   const [form,setForm]=useState({...emptyStudentForm});
   const [accessStudent,setAccessStudent]=useState<Student|null>(null),[contacts,setContacts]=useState<{mobile:string;label:string}[]>([]),[accessNumber,setAccessNumber]=useState(""),[initialPassword,setInitialPassword]=useState("");
@@ -51,7 +51,7 @@ export default function StudentsPage(){
     setForm(f=>({...f,campus_id:id,academic_year_id:"",academic_class_id:"",section_id:""}));
     if(!id){setYears([]);setClasses([]);setSections([]);return;}
     try{
-      const[ys,cls]=await Promise.all([foundationApi.academicYears(id),academicApi.classes(id)]);
+      const[ys,cls]=await Promise.all([foundationApi.academicYears(id),academicApi.legacyClasses(id)]);
       setYears(ys);setClasses(cls);
       const classId=cls[0]?.id||"";
       const ss=classId?await academicApi.sections(classId):[];
@@ -59,7 +59,7 @@ export default function StudentsPage(){
       setForm(f=>({...f,campus_id:id,academic_year_id:ys.find(y=>y.status==="active")?.id||ys[0]?.id||"",academic_class_id:classId,section_id:ss[0]?.id||""}));
     }catch(e){setError(apiErrorMessage(e,"Failed to load academic setup"));}
   };
-  const loadAcademic=async()=>{try{const cs=await foundationApi.campuses(schoolId);setCampuses(cs);await selectCampus(user?.campus_id||cs[0]?.id||"");}catch(e){setError(apiErrorMessage(e,"Failed to load academic setup. Create Organization Academic Year, classes and sections first."));}};
+  const loadAcademic=async()=>{try{const cs=await foundationApi.campuses(schoolId);await selectCampus(user?.campus_id||cs[0]?.id||"");}catch(e){setError(apiErrorMessage(e,"Failed to load academic setup. Create Organization Academic Year, classes and sections first."));}};
   useEffect(()=>{if(schoolId){void load();void loadAcademic();}},[schoolId,user?.campus_id]);
   useEffect(()=>{if(searchParams.get("view")==="new"&&canCreate)setShow(true);},[searchParams,canCreate]);
   const classChanged=async(id:string)=>{setForm(f=>({...f,academic_class_id:id,section_id:""}));try{const ss=await academicApi.sections(id);setSections(ss);setForm(f=>({...f,academic_class_id:id,section_id:ss[0]?.id||""}));}catch{setSections([])}};
@@ -67,7 +67,7 @@ export default function StudentsPage(){
   const submit=async(e:FormEvent)=>{
     e.preventDefault();setError("");setMessage("");
     const mandatory:[string,string][]=[
-      ["Campus",form.campus_id],["Academic Year",form.academic_year_id],["Class",form.academic_class_id],["Section",form.section_id],
+      ["Academic Year",form.academic_year_id],["Class",form.academic_class_id],["Section",form.section_id],
       ["Admission Number",form.admission_number],["Admission Date",form.admission_date],["Student Name",form.student_name],["Date of Birth",form.date_of_birth],
       ["Gender",form.gender],["Father's Name",form.father_name],["Mother's Name",form.mother_name],["Father's Mobile Number",form.father_number],["Caste Category",form.caste_category],
     ];
@@ -116,9 +116,9 @@ export default function StudentsPage(){
     {message&&<div className="rounded-lg bg-green-50 border border-green-200 text-green-700 px-4 py-3 text-sm">{message}</div>}
 
     <section className="card space-y-3">
-      <div><h2 className="font-semibold">Student Enrolment Setup</h2><p className="text-sm text-gray-500">Campus is the working scope. Academic Year → Class → Section determines where the Student is enrolled.</p></div>
+      <div><h2 className="font-semibold">Student Enrolment Setup</h2><p className="text-sm text-gray-500">Academic Year → Class → Section determines where the Student is enrolled in this School.</p></div>
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-        <Select label="Campus" value={form.campus_id} onChange={v=>void selectCampus(v)} options={campuses.map(c=>[c.id,c.name])}/>
+        
         <Select label="Academic Year*" value={form.academic_year_id} onChange={v=>setForm({...form,academic_year_id:v})} options={years.map(y=>[y.id,`${y.name} (${y.status})`])}/>
         <Select label="Class*" value={form.academic_class_id} onChange={v=>void classChanged(v)} options={classes.map(c=>[c.id,c.name])}/>
         <Select label="Section*" value={form.section_id} onChange={v=>setForm({...form,section_id:v})} options={sections.map(s=>[s.id,s.name])}/>

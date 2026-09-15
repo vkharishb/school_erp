@@ -17,7 +17,7 @@ type ApiErrorPayload = {
 
 const FIELD_LABELS: Record<string, string> = {
   campus_id: "Campus",
-  school_id: "School / Branch",
+  school_id: "School",
   organization_id: "Organization",
   academic_year_id: "Academic Year",
   academic_class_id: "Class",

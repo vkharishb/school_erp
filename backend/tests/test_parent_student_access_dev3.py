@@ -1,12 +1,13 @@
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.factories import create_org, create_org_year, create_school, suffix
+from tests.factories import activate_school_for_qa, create_org, create_org_year, create_school, suffix
 
 
 @pytest.mark.asyncio
 async def test_parent_student_shared_access_number_links_children_and_adds_yearly_charges_once(
-    client: AsyncClient, admin_headers: dict[str, str]
+    client: AsyncClient, admin_headers: dict[str, str], db_session: AsyncSession
 ):
     token = suffix()
     org = await create_org(
@@ -15,6 +16,7 @@ async def test_parent_student_shared_access_number_links_children_and_adds_yearl
     school = await create_school(
         client, admin_headers, org["id"], name="AKSHARA SCHOOL", area="Razole"
     )
+    await activate_school_for_qa(db_session, school["id"])
     org_year = await create_org_year(client, admin_headers, org["id"], activate=True)
 
     fee_head = await client.post(
