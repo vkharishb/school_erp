@@ -39,7 +39,6 @@ async def _purge_operational_school_data(db, organization_id) -> None:
     school_ids = select(School.id).where(School.organization_id == organization_id)
     campus_ids = select(Campus.id).where(Campus.school_id.in_(school_ids))
     student_ids = select(Student.id).where(Student.school_id.in_(school_ids))
-    teacher_ids = select(Teacher.id).where(Teacher.school_id.in_(school_ids))
     payment_ids = select(Payment.id).where(Payment.school_id.in_(school_ids))
     charge_ids = select(StudentCharge.id).where(StudentCharge.school_id.in_(school_ids))
     guardian_ids = select(Guardian.id).where(Guardian.school_id.in_(school_ids))
