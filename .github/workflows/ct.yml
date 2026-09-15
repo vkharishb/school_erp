@@ -1,44 +1,71 @@
 # Continuous Testing (CT)
 # Runs against the shared Neon development database until environments are separated.
+#
+# CT sequence:
+#   1. Backend – Pytest
+#   2. Frontend – Build smoke
+#   3. Playwright – E2E
+#
+# Playwright runs only after Backend Pytest and Frontend Smoke both pass.
 
 name: CT
 
 on:
   pull_request:
     branches: [main]
+
   workflow_run:
     workflows: ["CI"]
     types:
       - completed
     branches: [devops, dev]
+
   workflow_dispatch:
 
 concurrency:
-  # One shared Neon Dev database is temporary; never run database suites concurrently.
+  # One shared Neon Dev database is temporary.
+  # Never run multiple CT database suites concurrently.
   group: ct-neon-dev
   cancel-in-progress: true
 
+
 jobs:
+
+  # ============================================================
+  # BACKEND PYTEST
+  # ============================================================
+
   backend-tests:
     name: Backend – Pytest
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event.workflow_run.conclusion == 'success' }}
+
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'pull_request' ||
+        github.event.workflow_run.conclusion == 'success'
+      }}
+
     defaults:
       run:
         working-directory: backend
 
     env:
-      DATABASE_URL: ${{ secrets.DATABASE_URL_DEV}}
+      DATABASE_URL: ${{ secrets.DATABASE_URL_DEV }}
       SECRET_KEY: test-secret-key-for-ci-only-not-for-production
+
       APP_ENV: test
       DEBUG: "false"
+
       SUPER_ADMIN_EMAIL: superadmin@schoolerp.local
       SUPER_ADMIN_USERNAME: superadmin
-      SUPER_ADMIN_PASSWORD: TestPassword123!
+      SUPER_ADMIN_PASSWORD: ${{ secrets.SUPER_ADMIN_PASSWORD }}
       SUPER_ADMIN_FULL_NAME: Test Super Admin
-      CORS_ORIGINS: http://localhost:5173
+
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -60,28 +87,48 @@ jobs:
       - name: Validate Neon development database secret
         run: |
           if [ -z "$DATABASE_URL" ]; then
-            echo "Add NEON_DEV_DATABASE_URL in GitHub Actions secrets."
+            echo "GitHub Actions secret DATABASE_URL_DEV is missing."
+            exit 1
+          fi
+
+      - name: Validate super admin password secret
+        run: |
+          if [ -z "$SUPER_ADMIN_PASSWORD" ]; then
+            echo "GitHub Actions secret SUPER_ADMIN_PASSWORD is missing."
             exit 1
           fi
 
       - name: Run migrations
         run: alembic upgrade head
 
-      - name: Bootstrap (super admin + modules)
+      - name: Bootstrap super admin and modules
         run: python -m app.scripts.bootstrap
 
       - name: Run pytest
         run: pytest tests/ -v --tb=short
 
+
+  # ============================================================
+  # FRONTEND BUILD SMOKE
+  # ============================================================
+
   frontend-smoke:
     name: Frontend – Build smoke
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event.workflow_run.conclusion == 'success' }}
+
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'pull_request' ||
+        github.event.workflow_run.conclusion == 'success'
+      }}
+
     defaults:
       run:
         working-directory: frontend
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -94,10 +141,285 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install, type-check, and build
-        run: |
-          npm ci
-          npx tsc --noEmit
-          npm run build
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Production build
+        run: npm run build
         env:
           VITE_API_BASE_URL: http://localhost:8000/api/v1
+
+
+  # ============================================================
+  # PLAYWRIGHT E2E
+  # ============================================================
+
+  playwright-e2e:
+    name: Playwright – E2E
+    runs-on: ubuntu-latest
+
+    needs:
+      - backend-tests
+      - frontend-smoke
+
+    # Playwright is a release gate.
+    # It runs only when Backend Pytest and Frontend Smoke succeed.
+    if: >-
+      ${{
+        always() &&
+        needs.backend-tests.result == 'success' &&
+        needs.frontend-smoke.result == 'success'
+      }}
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL_DEV }}
+      SECRET_KEY: test-secret-key-for-ci-only-not-for-production
+
+      APP_ENV: test
+      DEBUG: "false"
+
+      SUPER_ADMIN_EMAIL: superadmin@schoolerp.local
+      SUPER_ADMIN_USERNAME: superadmin
+      SUPER_ADMIN_PASSWORD: ${{ secrets.SUPER_ADMIN_PASSWORD }}
+      SUPER_ADMIN_FULL_NAME: Test Super Admin
+
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+
+      # Playwright credentials
+      E2E_SUPER_ADMIN_USERNAME: superadmin
+      E2E_SUPER_ADMIN_PASSWORD: ${{ secrets.SUPER_ADMIN_PASSWORD }}
+
+      # Browser target
+      E2E_BASE_URL: http://127.0.0.1:5173
+
+      # Vite -> FastAPI proxy
+      VITE_DEV_API_TARGET: http://127.0.0.1:8001
+
+      CI: "true"
+
+    steps:
+
+      # --------------------------------------------------------
+      # CHECKOUT
+      # --------------------------------------------------------
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+
+      # --------------------------------------------------------
+      # BACKEND SETUP
+      # --------------------------------------------------------
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate Playwright secrets
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "GitHub Actions secret DATABASE_URL_DEV is missing."
+            exit 1
+          fi
+
+          if [ -z "$SUPER_ADMIN_PASSWORD" ]; then
+            echo "GitHub Actions secret SUPER_ADMIN_PASSWORD is missing."
+            exit 1
+          fi
+
+      - name: Run E2E database migrations
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Bootstrap E2E super admin and modules
+        working-directory: backend
+        run: python -m app.scripts.bootstrap
+
+
+      # --------------------------------------------------------
+      # START FASTAPI BACKEND
+      # --------------------------------------------------------
+
+      - name: Start backend
+        working-directory: backend
+        run: |
+          nohup uvicorn app.main:app \
+            --host 127.0.0.1 \
+            --port 8001 \
+            > "$RUNNER_TEMP/backend-e2e.log" 2>&1 &
+
+          echo $! > "$RUNNER_TEMP/backend-e2e.pid"
+
+      - name: Wait for backend
+        run: |
+          echo "Waiting for FastAPI backend..."
+
+          for i in {1..60}; do
+
+            if curl -fsS http://127.0.0.1:8001/health; then
+              echo ""
+              echo "Backend is ready."
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Backend failed to start."
+
+          echo ""
+          echo "========== BACKEND LOG =========="
+          cat "$RUNNER_TEMP/backend-e2e.log" || true
+
+          exit 1
+
+
+      # --------------------------------------------------------
+      # NODE / FRONTEND SETUP
+      # --------------------------------------------------------
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            frontend/e2e/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright dependencies
+        working-directory: frontend/e2e
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: frontend/e2e
+        run: npx playwright install --with-deps chromium
+
+
+      # --------------------------------------------------------
+      # START VITE FRONTEND
+      # --------------------------------------------------------
+
+      - name: Start frontend
+        working-directory: frontend
+        run: |
+          nohup npm run dev -- --host 127.0.0.1 \
+            > "$RUNNER_TEMP/frontend-e2e.log" 2>&1 &
+
+          echo $! > "$RUNNER_TEMP/frontend-e2e.pid"
+
+      - name: Wait for frontend
+        run: |
+          echo "Waiting for Vite frontend..."
+
+          for i in {1..60}; do
+
+            if curl -fsS http://127.0.0.1:5173; then
+              echo ""
+              echo "Frontend is ready."
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Frontend failed to start."
+
+          echo ""
+          echo "========== FRONTEND LOG =========="
+          cat "$RUNNER_TEMP/frontend-e2e.log" || true
+
+          exit 1
+
+
+      # --------------------------------------------------------
+      # PLAYWRIGHT TESTS
+      # --------------------------------------------------------
+
+      - name: Run Playwright E2E
+        working-directory: frontend/e2e
+        run: |
+          npx playwright test -c playwright.config.ts
+
+
+      # --------------------------------------------------------
+      # LOG COLLECTION
+      # --------------------------------------------------------
+
+      - name: Collect server logs
+        if: always()
+        run: |
+          mkdir -p frontend/e2e/test-results/server-logs
+
+          cp "$RUNNER_TEMP/backend-e2e.log" \
+            frontend/e2e/test-results/server-logs/backend.log || true
+
+          cp "$RUNNER_TEMP/frontend-e2e.log" \
+            frontend/e2e/test-results/server-logs/frontend.log || true
+
+
+      # --------------------------------------------------------
+      # PLAYWRIGHT ARTIFACTS
+      # --------------------------------------------------------
+
+      - name: Upload Playwright report and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            frontend/e2e/playwright-report/
+            frontend/e2e/test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+
+      # --------------------------------------------------------
+      # SHOW SERVER LOGS WHEN TESTS FAIL
+      # --------------------------------------------------------
+
+      - name: Display backend log on failure
+        if: failure()
+        run: |
+          echo "========== BACKEND LOG =========="
+          cat "$RUNNER_TEMP/backend-e2e.log" || true
+
+      - name: Display frontend log on failure
+        if: failure()
+        run: |
+          echo "========== FRONTEND LOG =========="
+          cat "$RUNNER_TEMP/frontend-e2e.log" || true
+
+
+      # --------------------------------------------------------
+      # CLEANUP
+      # --------------------------------------------------------
+
+      - name: Stop E2E servers
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/frontend-e2e.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/frontend-e2e.pid")" || true
+          fi
+
+          if [ -f "$RUNNER_TEMP/backend-e2e.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/backend-e2e.pid")" || true
+          fi
