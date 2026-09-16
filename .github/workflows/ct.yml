@@ -97,6 +97,9 @@ jobs:
             echo "GitHub Actions secret SUPER_ADMIN_PASSWORD is missing."
             exit 1
           fi
+      
+      - name: Reset dedicated test database
+        run: python -m app.scripts.reset_test_database
 
       - name: Run migrations
         run: alembic upgrade head
@@ -240,6 +243,10 @@ jobs:
             echo "GitHub Actions secret SUPER_ADMIN_PASSWORD is missing."
             exit 1
           fi
+          
+      - name: Reset E2E test database
+        working-directory: backend
+        run: python -m app.scripts.reset_test_database
 
       - name: Run E2E database migrations
         working-directory: backend
